@@ -31,7 +31,15 @@ client = None
 try:
     # Use environment variable for credentials
     print("Using credentials from environment variable")
-    credentials_info = json.loads(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}"))
+    creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}")
+    
+    # Print first few characters to debug (but don't expose full credentials)
+    if len(creds_str) > 0:
+        print(f"Credentials string length: {len(creds_str)}")
+        if len(creds_str) < 10:
+            print("WARNING: Credentials string is too short")
+        
+    credentials_info = json.loads(creds_str)
     
     # Initialize BigQuery client
     credentials = service_account.Credentials.from_service_account_info(credentials_info)
@@ -45,6 +53,10 @@ try:
     )
     
     print(f"Successfully initialized Google Cloud clients for project: recipe-data-pipeline")
+except json.JSONDecodeError as je:
+    print(f"Warning: Invalid JSON in credentials: {je}")
+    print("Check your GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable format")
+    print("Using mock data for local testing")
 except Exception as e:
     print(f"Warning: Unable to initialize Google Cloud clients: {e}")
     print("Using mock data for local testing")
@@ -67,38 +79,71 @@ async def search_recipes(request: Request):
 
     if not user_ingredients:
         return {"recipes": []}
-
-    # Build clause for each ingredient
-    match_clauses = [
-        f"""EXISTS (
-            SELECT 1 FROM UNNEST(ingredients) AS ing
-            WHERE LOWER(ing) LIKE '%{ing}%'
-        )""" for ing in user_ingredients
-    ]
-
-    score_expression = " + ".join([f"CASE WHEN {clause} THEN 1 ELSE 0 END" for clause in match_clauses])
-
-    # Always require at least 1 matching ingredient
-    min_matches = 1
+        
+    # For local testing or when BigQuery is not available
+    if client is None:
+        print("Using mock data for recipe search")
+        # Return mock data with the searched ingredients
+        return {
+            "recipes": [
+                {
+                    "title": f"Mock Recipe with {', '.join(user_ingredients[:2])}",
+                    "ingredients": user_ingredients + ["salt", "pepper", "olive oil"],
+                    "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
+                },
+                {
+                    "title": f"Another Recipe with {user_ingredients[0]}",
+                    "ingredients": [user_ingredients[0], "garlic", "onion", "butter"],
+                    "directions": ["Prepare ingredients", "Cook slowly", "Garnish and serve"]
+                }
+            ]
+        }
     
-    query = f"""
-        SELECT title, ingredients, directions
-        FROM `recipe-data-pipeline.recipes.structured_recipes`
-        WHERE ({score_expression}) >= {min_matches}
-        LIMIT 20
-    """
+    try:
+        # Build clause for each ingredient
+        match_clauses = [
+            f"""EXISTS (
+                SELECT 1 FROM UNNEST(ingredients) AS ing
+                WHERE LOWER(ing) LIKE '%{ing}%'
+            )""" for ing in user_ingredients
+        ]
 
-    results = client.query(query).result()
+        score_expression = " + ".join([f"CASE WHEN {clause} THEN 1 ELSE 0 END" for clause in match_clauses])
 
-    recipes = []
-    for row in results:
-        recipes.append({
-            "title": row.title,
-            "ingredients": row.ingredients,
-            "directions": row.directions
-        })
+        # Always require at least 1 matching ingredient
+        min_matches = 1
+        
+        query = f"""
+            SELECT title, ingredients, directions
+            FROM `recipe-data-pipeline.recipes.structured_recipes`
+            WHERE ({score_expression}) >= {min_matches}
+            LIMIT 20
+        """
 
-    return {"recipes": recipes}
+        results = client.query(query).result()
+
+        recipes = []
+        for row in results:
+            recipes.append({
+                "title": row.title,
+                "ingredients": row.ingredients,
+                "directions": row.directions
+            })
+
+        return {"recipes": recipes}
+    except Exception as e:
+        print(f"Error in recipe search: {e}")
+        # Return mock data if BigQuery query fails
+        return {
+            "recipes": [
+                {
+                    "title": f"Mock Recipe with {', '.join(user_ingredients[:2])} (Error fallback)",
+                    "ingredients": user_ingredients + ["salt", "pepper", "olive oil"],
+                    "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
+                }
+            ],
+            "error": str(e)
+        }
 
 @app.post("/analyze-image")
 async def analyze_image(file: UploadFile = File(...)):
