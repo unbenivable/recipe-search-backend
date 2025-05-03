@@ -7,6 +7,7 @@ import os
 import json
 import base64
 import sys
+import uvicorn
 from google.cloud import bigquery
 from google.oauth2 import service_account
 import vertexai
