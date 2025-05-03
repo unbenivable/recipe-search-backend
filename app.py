@@ -15,7 +15,46 @@ from vertexai.generative_models import GenerativeModel, Part
 from vertexai.vision_models import Image
 from vertexai.vision_models import MultiModalEmbeddingModel
 from io import BytesIO
-#
+import time
+from functools import lru_cache
+import hashlib
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+# Simple in-memory cache with TTL
+class TTLCache:
+    def __init__(self, max_size=100, ttl=3600):  # 1 hour default TTL
+        self.cache = {}
+        self.max_size = max_size
+        self.ttl = ttl
+        
+    def get(self, key):
+        if key not in self.cache:
+            return None
+        
+        value, timestamp = self.cache[key]
+        if time.time() - timestamp > self.ttl:
+            # Expired
+            del self.cache[key]
+            return None
+            
+        return value
+        
+    def set(self, key, value):
+        # Prune cache if it's too large
+        if len(self.cache) >= self.max_size:
+            # Remove oldest items
+            oldest_key = min(self.cache.items(), key=lambda x: x[1][1])[0]
+            del self.cache[oldest_key]
+            
+        self.cache[key] = (value, time.time())
+        
+    def clear(self):
+        self.cache.clear()
+
+# Initialize cache
+recipe_cache = TTLCache(max_size=200, ttl=1800)  # 30 minute cache
+
 app = FastAPI()
 
 app.add_middleware(
@@ -86,6 +125,12 @@ except Exception as e:
 
 class IngredientRequest(BaseModel):
     ingredients: List[str]
+    
+class SearchRequest(BaseModel):
+    ingredients: List[str]
+    page: int = 1
+    page_size: int = 20
+    min_matches: int = 1
 
 @app.get("/")
 async def root():
@@ -115,18 +160,35 @@ async def health_check_root():
     return {"status": "ok"}
 
 @app.post("/search")
-async def search_recipes(request: Request):
-    data = await request.json()
-    user_ingredients = [ing.lower().strip() for ing in data.get("ingredients", [])]
+async def search_recipes(request: SearchRequest):
+    user_ingredients = [ing.lower().strip() for ing in request.ingredients]
+    page = request.page
+    page_size = request.page_size
+    min_matches = request.min_matches
 
     if not user_ingredients:
-        return {"recipes": []}
+        return {"recipes": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
+    
+    # Create a cache key from the search parameters
+    cache_params = {
+        "ingredients": sorted(user_ingredients),
+        "page": page, 
+        "page_size": page_size,
+        "min_matches": min_matches
+    }
+    cache_key = hashlib.md5(json.dumps(cache_params).encode()).hexdigest()
+    
+    # Check cache first
+    cached_result = recipe_cache.get(cache_key)
+    if cached_result:
+        print(f"Cache hit for ingredients: {', '.join(user_ingredients)}, page {page}")
+        return cached_result
         
     # For local testing or when BigQuery is not available
     if client is None:
         print("Using mock data for recipe search")
         # Return mock data with the searched ingredients
-        return {
+        result = {
             "recipes": [
                 {
                     "title": f"Mock Recipe with {', '.join(user_ingredients[:2])}",
@@ -138,28 +200,53 @@ async def search_recipes(request: Request):
                     "ingredients": [user_ingredients[0], "garlic", "onion", "butter"],
                     "directions": ["Prepare ingredients", "Cook slowly", "Garnish and serve"]
                 }
-            ]
+            ],
+            "total": 2,
+            "page": page,
+            "page_size": page_size,
+            "pages": 1
         }
+        # Cache the result
+        recipe_cache.set(cache_key, result)
+        return result
     
     try:
-        # Build clause for each ingredient
-        match_clauses = [
-            f"""EXISTS (
-                SELECT 1 FROM UNNEST(ingredients) AS ing
-                WHERE LOWER(ing) LIKE '%{ing}%'
-            )""" for ing in user_ingredients
-        ]
+        start_time = time.time()
+        
+        # Optimize query: Use array contains for better performance
+        # Build optimized clauses for each ingredient
+        match_clauses = []
+        for ing in user_ingredients:
+            # For exact matches (faster)
+            exact_match = f"EXISTS(SELECT 1 FROM UNNEST(ingredients) AS i WHERE LOWER(i) = '{ing}')"
+            # For partial matches
+            partial_match = f"EXISTS(SELECT 1 FROM UNNEST(ingredients) AS i WHERE LOWER(i) LIKE '%{ing}%')"
+            match_clauses.append(f"({exact_match} OR {partial_match})")
 
         score_expression = " + ".join([f"CASE WHEN {clause} THEN 1 ELSE 0 END" for clause in match_clauses])
-
-        # Always require at least 1 matching ingredient
-        min_matches = 1
         
-        query = f"""
-            SELECT title, ingredients, directions
+        # First, get the total count for pagination
+        count_query = f"""
+            SELECT COUNT(*) as total
             FROM `recipe-data-pipeline.recipes.structured_recipes`
             WHERE ({score_expression}) >= {min_matches}
-            LIMIT 20
+        """
+        
+        count_result = client.query(count_query).result()
+        total_count = next(iter(count_result)).total
+        total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+        
+        # Calculate offset for pagination
+        offset = (page - 1) * page_size
+        
+        # Main query with pagination
+        query = f"""
+            SELECT title, ingredients, directions,
+                   ({score_expression}) AS match_score
+            FROM `recipe-data-pipeline.recipes.structured_recipes`
+            WHERE ({score_expression}) >= {min_matches}
+            ORDER BY match_score DESC
+            LIMIT {page_size} OFFSET {offset}
         """
 
         results = client.query(query).result()
@@ -169,14 +256,30 @@ async def search_recipes(request: Request):
             recipes.append({
                 "title": row.title,
                 "ingredients": row.ingredients,
-                "directions": row.directions
+                "directions": row.directions,
+                "match_score": row.match_score
             })
 
-        return {"recipes": recipes}
+        query_time = time.time() - start_time
+        print(f"Query executed in {query_time:.2f} seconds")
+        
+        result = {
+            "recipes": recipes, 
+            "query_time_seconds": query_time,
+            "total": total_count,
+            "page": page,
+            "page_size": page_size,
+            "pages": total_pages
+        }
+        
+        # Cache the result
+        recipe_cache.set(cache_key, result)
+        
+        return result
     except Exception as e:
         print(f"Error in recipe search: {e}")
         # Return mock data if BigQuery query fails
-        return {
+        error_result = {
             "recipes": [
                 {
                     "title": f"Mock Recipe with {', '.join(user_ingredients[:2])} (Error fallback)",
@@ -184,8 +287,13 @@ async def search_recipes(request: Request):
                     "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
                 }
             ],
-            "error": str(e)
+            "error": str(e),
+            "total": 1,
+            "page": page,
+            "page_size": page_size,
+            "pages": 1
         }
+        return error_result
 
 @app.post("/analyze-image")
 async def analyze_image(file: UploadFile = File(...)):
@@ -343,51 +451,69 @@ async def image_to_recipe(file: UploadFile = File(...)):
     
     Returns all three results combined.
     """
+    start_time = time.time()
+    
     # First, analyze the image to get ingredients
-    analysis_result = await analyze_image(file)
+    contents = await file.read()
+    
+    # Create a cache key for this image
+    image_hash = hashlib.md5(contents).hexdigest()
+    cache_key = f"img2recipe_{image_hash}"
+    
+    # Check cache first
+    cached_result = recipe_cache.get(cache_key)
+    if cached_result:
+        print(f"Cache hit for image: {file.filename}")
+        return cached_result
+    
+    # Set up async tasks to run in parallel
+    async def analyze_image_task():
+        # Reset file position
+        await file.seek(0)
+        return await analyze_image(file)
+    
+    async def get_similar_recipes_task():
+        # Reset file position
+        await file.seek(0)
+        return await search_similar_recipe_images(file)
+    
+    # Run both tasks in parallel
+    analysis_task = asyncio.create_task(analyze_image_task())
+    similar_task = asyncio.create_task(get_similar_recipes_task())
+    
+    # Wait for analysis to complete first (we need ingredients for recipe search)
+    analysis_result = await analysis_task
     ingredients = analysis_result.get("ingredients", [])
     
-    # Rewind the file after reading it in analyze_image
-    await file.seek(0)
+    # For recipe search, we'll create a search request
+    search_request = SearchRequest(
+        ingredients=ingredients,
+        page=1,
+        page_size=10,
+        min_matches=1
+    )
     
-    # Find visually similar recipes
-    similar_result = await search_similar_recipe_images(file)
+    # Start recipe search immediately
+    recipes_task = asyncio.create_task(search_recipes(search_request))
+    
+    # Wait for both remaining tasks to complete
+    similar_result, recipes_result = await asyncio.gather(similar_task, recipes_task)
+    
     similar_recipes = similar_result.get("similar_recipes", [])
+    recipes_by_ingredients = recipes_result.get("recipes", [])
     
-    # Get recipes by ingredients
-    recipes_by_ingredients = []
-    if client is not None and ingredients:
-        # Build query similar to search_by_image function
-        ingredient_conditions = [
-            f"LOWER(ARRAY_TO_STRING(ingredients, ',')) LIKE '%{ingredient.lower()}%'"
-            for ingredient in ingredients
-        ]
-        
-        condition_query = " + ".join(
-            [f"CASE WHEN {cond} THEN 1 ELSE 0 END" for cond in ingredient_conditions]
-        )
-
-        query = f"""
-            SELECT title, ingredients, directions
-            FROM `recipe-data-pipeline.recipes.structured_recipes`
-            WHERE ({condition_query}) >= 1
-            LIMIT 10
-        """
-
-        results = client.query(query).result()
-
-        for row in results:
-            recipes_by_ingredients.append({
-                "title": row.title,
-                "ingredients": row.ingredients,
-                "directions": row.directions,
-            })
-    
-    return {
+    # Prepare the final response
+    result = {
         "detected_ingredients": ingredients,
         "recipes_by_ingredients": recipes_by_ingredients,
-        "similar_looking_recipes": similar_recipes
+        "similar_looking_recipes": similar_recipes,
+        "processing_time_seconds": time.time() - start_time
     }
+    
+    # Cache the result
+    recipe_cache.set(cache_key, result)
+    
+    return result
 
 # Start the server for local testing
 if __name__ == "__main__":
