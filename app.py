@@ -1,4 +1,4 @@
-# Recipe Search Backend API - Migrated from OpenAI to Google Vertex AI
+# Recipe Search Backend API - With Google Vertex AI
 from fastapi import FastAPI, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
