@@ -105,6 +105,14 @@ async def health_check():
     Returns status OK to indicate the service is up and running.
     """
     return {"status": "ok"}
+    
+# Add explicit endpoint at root level (no /api prefix) as fallback
+@app.get("/health")
+async def health_check_root():
+    """
+    Alternative health check endpoint without /api prefix.
+    """
+    return {"status": "ok"}
 
 @app.post("/search")
 async def search_recipes(request: Request):
