@@ -33,13 +33,28 @@ try:
     print("Using credentials from environment variable")
     creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}")
     
+    # Clean up the credentials string
+    # Remove any single quotes at beginning and end (common in .env files)
+    if creds_str.startswith("'") and creds_str.endswith("'"):
+        creds_str = creds_str[1:-1]
+    elif creds_str.startswith('"') and creds_str.endswith('"'):
+        creds_str = creds_str[1:-1]
+        
+    # Remove any line breaks that might have been introduced
+    creds_str = creds_str.replace('\n', '\\n')
+    
     # Print first few characters to debug (but don't expose full credentials)
     if len(creds_str) > 0:
         print(f"Credentials string length: {len(creds_str)}")
         if len(creds_str) < 10:
             print("WARNING: Credentials string is too short")
         
-    credentials_info = json.loads(creds_str)
+    try:
+        credentials_info = json.loads(creds_str)
+        print("Successfully parsed credentials JSON")
+    except json.JSONDecodeError as je:
+        print(f"JSON parse error at position {je.pos}, line {je.lineno}, column {je.colno}")
+        raise
     
     # Initialize BigQuery client
     credentials = service_account.Credentials.from_service_account_info(credentials_info)
