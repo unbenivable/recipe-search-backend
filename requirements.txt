@@ -3,4 +3,5 @@ uvicorn
 google-cloud-bigquery
 google-auth
 python-multipart
-google-cloud-aiplatform
+google-cloud-aiplatform>=1.40.0
+pillow

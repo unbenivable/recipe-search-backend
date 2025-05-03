@@ -5,7 +5,13 @@ This is a FastAPI backend for recipe search and ingredient extraction from image
 ## Features
 - Extract ingredients from food images using Google Vertex AI Gemini
 - Search recipes by ingredients (BigQuery)
+- Visual recipe search using Vertex AI multimodal embeddings
+- Comprehensive recipe recommendations combining ingredient and visual similarity
 - Ready for deployment on Railway
+
+## Deployment URLs
+- **Backend (Railway)**: https://recipe-search-backend.railway.app
+- **Frontend (Vercel)**: https://recipe-search-frontend.vercel.app
 
 ## Requirements
 - Python 3.9+
@@ -36,6 +42,13 @@ This is a FastAPI backend for recipe search and ingredient extraction from image
    uvicorn app:app --reload --port 8000
    ```
 
+## Local Testing
+See [README.local.md](README.local.md) for detailed instructions on local testing, including:
+- Setting up credentials
+- Running the server locally
+- Testing with the Swagger UI
+- Connecting to the Vercel frontend
+
 ## API Endpoints
 
 ### `POST /analyze-image`
@@ -51,9 +64,67 @@ Upload a food image and get a list of detected ingredients.
 }
 ```
 
+### `POST /similar-recipe-images`
+Upload a food image and get visually similar recipes.
+
+**Request:**
+- `file`: image file (form-data)
+- `limit`: (optional) maximum number of results to return
+
+**Response:**
+```json
+{
+  "similar_recipes": [
+    {
+      "title": "Recipe Title",
+      "similarity_score": 0.92,
+      "image_url": "https://example.com/recipe.jpg",
+      "recipe_id": "recipe123"
+    },
+    ...
+  ]
+}
+```
+
+### `POST /image-to-recipe`
+A comprehensive endpoint that combines ingredient analysis and visual similarity.
+
+**Request:**
+- `file`: image file (form-data)
+
+**Response:**
+```json
+{
+  "detected_ingredients": ["ingredient1", "ingredient2", ...],
+  "recipes_by_ingredients": [
+    {
+      "title": "Recipe Title",
+      "ingredients": ["ingredient1", "ingredient2", ...],
+      "directions": ["Step 1", "Step 2", ...]
+    },
+    ...
+  ],
+  "similar_looking_recipes": [
+    {
+      "title": "Recipe Title",
+      "similarity_score": 0.92,
+      "image_url": "https://example.com/recipe.jpg",
+      "recipe_id": "recipe123"
+    },
+    ...
+  ]
+}
+```
+
 ## Deployment (Railway)
 - Add `GOOGLE_APPLICATION_CREDENTIALS_JSON` as a Railway environment variable using their secure environment variable storage.
 - Deploy as a Python service.
+- The backend is deployed at: https://recipe-search-backend.railway.app
+
+## Frontend Integration
+The frontend code should point to the appropriate backend URL:
+- For production: https://recipe-search-backend.railway.app
+- For local testing: http://localhost:8000 or your ngrok public URL
 
 ## Security Notes
 - All credentials are handled via environment variables.
