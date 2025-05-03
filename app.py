@@ -87,6 +87,25 @@ except Exception as e:
 class IngredientRequest(BaseModel):
     ingredients: List[str]
 
+@app.get("/")
+async def root():
+    """
+    Root endpoint that provides basic application info.
+    """
+    return {
+        "app": "Recipe Search API",
+        "status": "ok",
+        "docs": "/docs"
+    }
+
+@app.get("/api/health")
+async def health_check():
+    """
+    Health check endpoint for Railway deployment.
+    Returns status OK to indicate the service is up and running.
+    """
+    return {"status": "ok"}
+
 @app.post("/search")
 async def search_recipes(request: Request):
     data = await request.json()
