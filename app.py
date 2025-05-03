@@ -78,10 +78,13 @@ async def search_recipes(request: Request):
 
     score_expression = " + ".join([f"CASE WHEN {clause} THEN 1 ELSE 0 END" for clause in match_clauses])
 
+    # Always require at least 1 matching ingredient
+    min_matches = 1
+    
     query = f"""
         SELECT title, ingredients, directions
         FROM `recipe-data-pipeline.recipes.structured_recipes`
-        WHERE ({score_expression}) >= 3
+        WHERE ({score_expression}) >= {min_matches}
         LIMIT 20
     """
 
@@ -175,7 +178,7 @@ async def search_by_image(file: UploadFile = File(...)):
     query = f"""
         SELECT title, ingredients, directions
         FROM `recipe-data-pipeline.recipes.structured_recipes`
-        WHERE ({condition_query}) >= 2
+        WHERE ({condition_query}) >= 1
         LIMIT 20
     """
 
@@ -280,7 +283,7 @@ async def image_to_recipe(file: UploadFile = File(...)):
         query = f"""
             SELECT title, ingredients, directions
             FROM `recipe-data-pipeline.recipes.structured_recipes`
-            WHERE ({condition_query}) >= 2
+            WHERE ({condition_query}) >= 1
             LIMIT 10
         """
 
