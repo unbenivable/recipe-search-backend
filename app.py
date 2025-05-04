@@ -131,6 +131,7 @@ class SearchRequest(BaseModel):
     page: int = 1
     page_size: int = 20
     min_matches: int = 1
+    max_results: int = 1000  # Maximum total results to return
 
 @app.get("/")
 async def root():
@@ -230,14 +231,18 @@ async def search_recipes(request: SearchRequest):
             SELECT COUNT(*) as total
             FROM `recipe-data-pipeline.recipes.structured_recipes`
             WHERE ({score_expression}) >= {min_matches}
+            LIMIT {request.max_results}  -- Apply global result limit
         """
         
         count_result = client.query(count_query).result()
-        total_count = next(iter(count_result)).total
+        total_count = min(next(iter(count_result)).total, request.max_results)  # Apply max result limit
         total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
         
-        # Calculate offset for pagination
-        offset = (page - 1) * page_size
+        # Calculate offset for pagination, ensuring we don't exceed the max_results
+        offset = min((page - 1) * page_size, total_count - 1)
+        
+        # Adjust page_size to not exceed maximum results
+        effective_page_size = min(page_size, request.max_results - offset)
         
         # Main query with pagination
         query = f"""
@@ -246,7 +251,7 @@ async def search_recipes(request: SearchRequest):
             FROM `recipe-data-pipeline.recipes.structured_recipes`
             WHERE ({score_expression}) >= {min_matches}
             ORDER BY match_score DESC
-            LIMIT {page_size} OFFSET {offset}
+            LIMIT {effective_page_size} OFFSET {offset}
         """
 
         results = client.query(query).result()
@@ -332,7 +337,7 @@ async def analyze_image(file: UploadFile = File(...)):
         return {"ingredients": ["tomato", "onion", "garlic"], "error": str(e)}
 
 @app.post("/search-by-image")
-async def search_by_image(file: UploadFile = File(...)):
+async def search_by_image(file: UploadFile = File(...), max_results: int = 1000):
     """
     Analyze a food image and search for recipes based on the detected ingredients.
     
@@ -345,49 +350,24 @@ async def search_by_image(file: UploadFile = File(...)):
     if not ingredients:
         return {"recipes": [], "detected_ingredients": []}
     
-    # For local testing without BigQuery
-    if client is None:
-        print("Using mock data for recipe search since BigQuery is not available")
-        return {
-            "recipes": [
-                {
-                    "title": "Sample Recipe with " + ", ".join(ingredients[:2]),
-                    "ingredients": ingredients + ["salt", "pepper", "olive oil"],
-                    "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
-                }
-            ],
-            "detected_ingredients": ingredients
-        }
-    
-    # Then use those ingredients to search for recipes
-    ingredient_conditions = [
-        f"LOWER(ARRAY_TO_STRING(ingredients, ',')) LIKE '%{ingredient.lower()}%'"
-        for ingredient in ingredients
-    ]
-    
-    # Require at least 2 matching ingredients
-    condition_query = " + ".join(
-        [f"CASE WHEN {cond} THEN 1 ELSE 0 END" for cond in ingredient_conditions]
+    # Create a SearchRequest to use our optimized search endpoint
+    search_request = SearchRequest(
+        ingredients=ingredients,
+        page=1,
+        page_size=20,
+        min_matches=1,
+        max_results=max_results
     )
-
-    query = f"""
-        SELECT title, ingredients, directions
-        FROM `recipe-data-pipeline.recipes.structured_recipes`
-        WHERE ({condition_query}) >= 1
-        LIMIT 20
-    """
-
-    results = client.query(query).result()
-
-    recipes = []
-    for row in results:
-        recipes.append({
-            "title": row.title,
-            "ingredients": row.ingredients,
-            "directions": row.directions,
-        })
-
-    return {"recipes": recipes, "detected_ingredients": ingredients}
+    
+    # Use the existing search function
+    search_result = await search_recipes(search_request)
+    
+    return {
+        "recipes": search_result.get("recipes", []),
+        "detected_ingredients": ingredients,
+        "total": search_result.get("total", 0),
+        "pages": search_result.get("pages", 0)
+    }
 
 @app.post("/similar-recipe-images")
 async def search_similar_recipe_images(
@@ -442,7 +422,7 @@ async def search_similar_recipe_images(
         return {"error": str(e)}
 
 @app.post("/image-to-recipe")
-async def image_to_recipe(file: UploadFile = File(...)):
+async def image_to_recipe(file: UploadFile = File(...), max_results: int = 1000):
     """
     A comprehensive endpoint that:
     1. Analyzes the food image to identify ingredients
@@ -458,7 +438,7 @@ async def image_to_recipe(file: UploadFile = File(...)):
     
     # Create a cache key for this image
     image_hash = hashlib.md5(contents).hexdigest()
-    cache_key = f"img2recipe_{image_hash}"
+    cache_key = f"img2recipe_{image_hash}_{max_results}"  # Include max_results in cache key
     
     # Check cache first
     cached_result = recipe_cache.get(cache_key)
@@ -475,7 +455,7 @@ async def image_to_recipe(file: UploadFile = File(...)):
     async def get_similar_recipes_task():
         # Reset file position
         await file.seek(0)
-        return await search_similar_recipe_images(file)
+        return await search_similar_recipe_images(file, limit=min(10, max_results))
     
     # Run both tasks in parallel
     analysis_task = asyncio.create_task(analyze_image_task())
@@ -490,7 +470,8 @@ async def image_to_recipe(file: UploadFile = File(...)):
         ingredients=ingredients,
         page=1,
         page_size=10,
-        min_matches=1
+        min_matches=1,
+        max_results=max_results
     )
     
     # Start recipe search immediately
