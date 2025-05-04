@@ -217,3 +217,111 @@ class IneffectiveParent extends React.Component {
 // SOLUTION: Use PureComponent or React.memo
 const MemoizedSearchResults = memo(SearchResults);
 // Now it only rerenders when searchData actually changes 
+
+// ========================
+// 6. FIX CIRCULAR REFERENCE ERRORS
+// ========================
+
+// PROBLEM: The current error you're seeing with SVGSVGElement
+// This happens when React DOM elements get included in API requests
+
+// BROKEN EXAMPLE - This causes "Converting circular structure to JSON" errors
+function BrokenSearchComponent() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const svgRef = useRef(null);
+  
+  const handleSearch = async () => {
+    try {
+      // WRONG: Accidentally including the SVG element or event object in the request
+      const response = await axios.post('https://web-production-9df5.up.railway.app/search', {
+        ingredients: [searchTerm],
+        // The problem is here - including DOM references or event objects
+        svgElement: svgRef.current, // This creates circular references!
+        // Or sometimes event handlers accidentally pass the entire event object:
+        // event: e, // This also creates circular references!
+      });
+      
+      // Process response...
+    } catch (error) {
+      console.error('Error fetching recipes:', error);
+    }
+  };
+  
+  return (
+    <div>
+      <input 
+        type="text" 
+        value={searchTerm} 
+        onChange={(e) => setSearchTerm(e.target.value)} 
+      />
+      <svg ref={svgRef}>...</svg>
+      <button onClick={handleSearch}>Search</button>
+    </div>
+  );
+}
+
+// FIXED EXAMPLE - Always sanitize data before sending to API
+function FixedSearchComponent() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const svgRef = useRef(null);
+  
+  const handleSearch = async () => {
+    try {
+      // CORRECT: Only send the data needed by the API
+      const response = await axios.post('https://web-production-9df5.up.railway.app/search', {
+        ingredients: [searchTerm.trim()], // Just the plain string data
+        // No DOM elements or circular references
+      });
+      
+      // Process response...
+    } catch (error) {
+      console.error('Error fetching recipes:', error);
+    }
+  };
+  
+  return (
+    <div>
+      <input 
+        type="text" 
+        value={searchTerm} 
+        onChange={(e) => setSearchTerm(e.target.value)} 
+      />
+      <svg ref={svgRef}>...</svg>
+      <button onClick={handleSearch}>Search</button>
+    </div>
+  );
+}
+
+// Helper function to sanitize data before sending to API
+// Use this to ensure you're only sending serializable data
+function sanitizeDataForAPI(data) {
+  // Method 1: Manual approach - specify exactly what to include
+  return {
+    ingredients: Array.isArray(data.ingredients) 
+      ? data.ingredients.map(ing => typeof ing === 'string' ? ing.trim() : '')
+      : [],
+    page: typeof data.page === 'number' ? data.page : 1,
+    page_size: typeof data.page_size === 'number' ? data.page_size : 20,
+    // Add other needed fields...
+  };
+  
+  // Method 2: Alternative using JSON serialization to strip non-serializable data
+  // return JSON.parse(JSON.stringify(data));
+  // Note: This can be inefficient for large objects but works for simple cases
+}
+
+// Example usage:
+async function safeApiCall(ingredients) {
+  try {
+    const dataToSend = sanitizeDataForAPI({ 
+      ingredients: ingredients,
+      page: 1
+    });
+    
+    const response = await axios.post('https://web-production-9df5.up.railway.app/search', dataToSend);
+    return response.data;
+  } catch (error) {
+    console.error('Error:', error);
+    throw error;
+  }
+} 
