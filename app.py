@@ -22,6 +22,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import datetime
 from fastapi.responses import JSONResponse
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Simple in-memory cache with TTL
 class TTLCache:
@@ -76,7 +81,7 @@ class RequestThrottler:
             self.result_count = 0
             self.last_reset = now
             self.ip_timestamps = {}
-            print(f"REQUEST COUNTERS RESET. New interval started at {now}")
+            logger.info(f"REQUEST COUNTERS RESET. New interval started at {now}")
         
         # Limit requests per IP (max 20 requests per minute per IP)
         ip_history = self.ip_timestamps.get(client_ip, [])
@@ -86,16 +91,16 @@ class RequestThrottler:
         
         # Check IP rate limit
         if len(ip_history) >= 20:
-            print(f"THROTTLING {client_ip}: Made {len(ip_history)} requests in the last minute")
+            logger.info(f"THROTTLING {client_ip}: Made {len(ip_history)} requests in the last minute")
             return True
             
         # Global limits: max 500 requests or 1,000 results per 10-minute window
         if self.request_count >= 500:
-            print(f"GLOBAL THROTTLING: {self.request_count} requests in the current window")
+            logger.info(f"GLOBAL THROTTLING: {self.request_count} requests in the current window")
             return True
             
         if self.result_count >= 1000:
-            print(f"GLOBAL THROTTLING: {self.result_count} results in the current window")
+            logger.info(f"GLOBAL THROTTLING: {self.result_count} results in the current window")
             return True
             
         # Increment request counter
@@ -105,16 +110,22 @@ class RequestThrottler:
     def add_results(self, count):
         """Add to the result counter"""
         self.result_count += count
-        print(f"COUNTER UPDATE: {self.request_count} requests, {self.result_count} results in current window")
+        logger.info(f"COUNTER UPDATE: {self.request_count} requests, {self.result_count} results in current window")
 
 # Initialize throttler
 throttler = RequestThrottler()
 
 app = FastAPI()
 
+allowed_origins = [
+    "https://recipe-search-frontend.vercel.app"
+]
+if os.environ.get("ENV") == "development":
+    allowed_origins.append("http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,7 +135,7 @@ app.add_middleware(
 client = None
 try:
     # Use environment variable for credentials
-    print("Using credentials from environment variable")
+    logger.info("Using credentials from environment variable")
     creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}")
     
     # Clean up the credentials string
@@ -139,15 +150,15 @@ try:
     
     # Print first few characters to debug (but don't expose full credentials)
     if len(creds_str) > 0:
-        print(f"Credentials string length: {len(creds_str)}")
+        logger.info(f"Credentials string length: {len(creds_str)}")
         if len(creds_str) < 10:
-            print("WARNING: Credentials string is too short")
+            logger.warning("WARNING: Credentials string is too short")
         
     try:
         credentials_info = json.loads(creds_str)
-        print("Successfully parsed credentials JSON")
+        logger.info("Successfully parsed credentials JSON")
     except json.JSONDecodeError as je:
-        print(f"JSON parse error at position {je.pos}, line {je.lineno}, column {je.colno}")
+        logger.error(f"JSON parse error at position {je.pos}, line {je.lineno}, column {je.colno}")
         raise
     
     # Initialize BigQuery client
@@ -161,22 +172,22 @@ try:
         credentials=credentials
     )
     
-    print(f"Successfully initialized Google Cloud clients for project: recipe-data-pipeline")
+    logger.info(f"Successfully initialized Google Cloud clients for project: recipe-data-pipeline")
 except json.JSONDecodeError as je:
-    print(f"Warning: Invalid JSON in credentials: {je}")
-    print("Check your GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable format")
-    print("Using mock data for local testing")
+    logger.warning(f"Warning: Invalid JSON in credentials: {je}")
+    logger.warning("Check your GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable format")
+    logger.warning("Using mock data for local testing")
 except Exception as e:
-    print(f"Warning: Unable to initialize Google Cloud clients: {e}")
-    print("Using mock data for local testing")
+    logger.warning(f"Warning: Unable to initialize Google Cloud clients: {e}")
+    logger.warning("Using mock data for local testing")
 
 # Load the multimodal embedding model for image search
 embedding_model = None
 try:
     embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
-    print("Successfully loaded MultiModal Embedding model")
+    logger.info("Successfully loaded MultiModal Embedding model")
 except Exception as e:
-    print(f"Warning: Unable to load MultiModal Embedding model: {e}")
+    logger.warning(f"Warning: Unable to load MultiModal Embedding model: {e}")
 
 class IngredientRequest(BaseModel):
     ingredients: List[str]
@@ -187,6 +198,9 @@ class SearchRequest(BaseModel):
     page_size: int = 20
     min_matches: int = 1
     max_results: int = 100  # Reduced from 200 to 100 maximum results
+
+# Use environment variable for ABSOLUTE_MAX_RESULTS
+ABSOLUTE_MAX_RESULTS = int(os.environ.get("MAX_RESULTS", 50))
 
 @app.get("/")
 async def root():
@@ -213,28 +227,26 @@ async def health_check_root():
     """
     Alternative health check endpoint without /api prefix.
     """
+    logger.info("Health check called")
     return {"status": "ok"}
 
 @app.post("/search")
 async def search_recipes(request: SearchRequest, req: Request):
     # Apply absolute hard limits regardless of what's requested
-    ABSOLUTE_MAX_RESULTS = 50  # Further reduced from 100 to 50 maximum results
-    
-    user_ingredients = [ing.lower().strip() for ing in request.ingredients]
     page = max(1, min(100, request.page))  # Limit page between 1-100
     page_size = max(1, min(20, request.page_size))  # Limit page_size between 1-20
     min_matches = request.min_matches
     max_results = min(ABSOLUTE_MAX_RESULTS, request.max_results)
     
     client_ip = req.state.client_ip
-    print(f"SEARCH REQUEST from {client_ip}: ingredients={user_ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
+    logger.info(f"SEARCH REQUEST from {client_ip}: ingredients={request.ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
 
-    if not user_ingredients:
+    if not request.ingredients:
         return {"recipes": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
     
     # Create a cache key from the search parameters
     cache_params = {
-        "ingredients": sorted(user_ingredients),
+        "ingredients": sorted(request.ingredients),
         "page": page, 
         "page_size": page_size,
         "min_matches": min_matches
@@ -244,23 +256,23 @@ async def search_recipes(request: SearchRequest, req: Request):
     # Check cache first
     cached_result = recipe_cache.get(cache_key)
     if cached_result:
-        print(f"Cache hit for ingredients: {', '.join(user_ingredients)}, page {page}")
+        logger.info(f"Cache hit for ingredients: {', '.join(request.ingredients)}, page {page}")
         return cached_result
         
     # For local testing or when BigQuery is not available
-    if client is None:
-        print("Using mock data for recipe search")
+    if client is None and os.environ.get("ENV") != "production":
+        logger.info("Using mock data for recipe search (development mode)")
         # Return mock data with the searched ingredients
         result = {
             "recipes": [
                 {
-                    "title": f"Mock Recipe with {', '.join(user_ingredients[:2])}",
-                    "ingredients": user_ingredients + ["salt", "pepper", "olive oil"],
+                    "title": f"Mock Recipe with {', '.join(request.ingredients[:2])}",
+                    "ingredients": request.ingredients + ["salt", "pepper", "olive oil"],
                     "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
                 },
                 {
-                    "title": f"Another Recipe with {user_ingredients[0]}",
-                    "ingredients": [user_ingredients[0], "garlic", "onion", "butter"],
+                    "title": f"Another Recipe with {request.ingredients[0]}",
+                    "ingredients": [request.ingredients[0], "garlic", "onion", "butter"],
                     "directions": ["Prepare ingredients", "Cook slowly", "Garnish and serve"]
                 }
             ],
@@ -279,7 +291,7 @@ async def search_recipes(request: SearchRequest, req: Request):
         # Optimize query: Use array contains for better performance
         # Build optimized clauses for each ingredient
         match_clauses = []
-        for ing in user_ingredients:
+        for ing in request.ingredients:
             # For exact matches (faster)
             exact_match = f"EXISTS(SELECT 1 FROM UNNEST(ingredients) AS i WHERE LOWER(i) = '{ing}')"
             # For partial matches
@@ -310,7 +322,7 @@ async def search_recipes(request: SearchRequest, req: Request):
         effective_page_size = min(page_size, ABSOLUTE_MAX_RESULTS - offset)
         
         # Add debug logging
-        print(f"SQL QUERY: ingredients={len(user_ingredients)}, page={page}, limit={effective_page_size}, offset={offset}, max_results={max_results}")
+        logger.info(f"SQL QUERY: ingredients={len(request.ingredients)}, page={page}, limit={effective_page_size}, offset={offset}, max_results={max_results}")
         
         # Main query with pagination
         query = f"""
@@ -328,7 +340,7 @@ async def search_recipes(request: SearchRequest, req: Request):
         for row in results:
             # Only add up to our absolute max
             if len(recipes) >= ABSOLUTE_MAX_RESULTS:
-                print(f"WARNING: Truncating results at {ABSOLUTE_MAX_RESULTS}")
+                logger.warning(f"WARNING: Truncating results at {ABSOLUTE_MAX_RESULTS}")
                 break
                 
             recipes.append({
@@ -339,7 +351,7 @@ async def search_recipes(request: SearchRequest, req: Request):
             })
 
         query_time = time.time() - start_time
-        print(f"Query executed in {query_time:.2f} seconds")
+        logger.info(f"Query executed in {query_time:.2f} seconds")
         
         # Track total results for rate limiting
         throttler.add_results(len(recipes))
@@ -374,13 +386,13 @@ async def search_recipes(request: SearchRequest, req: Request):
         
         return result
     except Exception as e:
-        print(f"Error in recipe search: {e}")
+        logger.error(f"Error in recipe search: {e}")
         # Return mock data if BigQuery query fails
         error_result = {
             "recipes": [
                 {
-                    "title": f"Mock Recipe with {', '.join(user_ingredients[:2])} (Error fallback)",
-                    "ingredients": user_ingredients + ["salt", "pepper", "olive oil"],
+                    "title": f"Mock Recipe with {', '.join(request.ingredients[:2])} (Error fallback)",
+                    "ingredients": request.ingredients + ["salt", "pepper", "olive oil"],
                     "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
                 }
             ],
@@ -424,7 +436,7 @@ async def analyze_image(file: UploadFile = File(...)):
         
         return {"ingredients": ingredients}
     except Exception as e:
-        print(f"Error analyzing image: {e}")
+        logger.error(f"Error analyzing image: {e}")
         # Return mock data for testing if analysis fails
         return {"ingredients": ["tomato", "onion", "garlic"], "error": str(e)}
 
@@ -442,13 +454,12 @@ async def search_by_image(
     This combines the image analysis and recipe search in one convenient endpoint.
     """
     # Apply absolute hard limits
-    ABSOLUTE_MAX_RESULTS = 50
     page = max(1, min(100, page))
     page_size = max(1, min(20, page_size))
     max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
     
     client_ip = req.state.client_ip if req else "unknown"
-    print(f"IMAGE SEARCH from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
+    logger.info(f"IMAGE SEARCH from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
     
     # First, analyze the image to get ingredients
     analysis_result = await analyze_image(file)
@@ -540,7 +551,7 @@ async def search_similar_recipe_images(
             "message": "In production, this would return actual similar recipes based on vector search"
         }
     except Exception as e:
-        print(f"Error in image similarity search: {e}")
+        logger.error(f"Error in image similarity search: {e}")
         return {"error": str(e)}
 
 @app.post("/image-to-recipe")
@@ -560,13 +571,12 @@ async def image_to_recipe(
     Returns all three results combined.
     """
     # Apply absolute hard limits
-    ABSOLUTE_MAX_RESULTS = 50
     page = max(1, min(100, page))
     page_size = max(1, min(20, page_size))
     max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
     
     client_ip = req.state.client_ip if req else "unknown"
-    print(f"IMAGE-TO-RECIPE from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
+    logger.info(f"IMAGE-TO-RECIPE from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
     
     start_time = time.time()
     
@@ -580,7 +590,7 @@ async def image_to_recipe(
     # Check cache first
     cached_result = recipe_cache.get(cache_key)
     if cached_result:
-        print(f"Cache hit for image: {file.filename}")
+        logger.info(f"Cache hit for image: {file.filename}")
         return cached_result
     
     # Set up async tasks to run in parallel
