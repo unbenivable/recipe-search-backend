@@ -125,7 +125,7 @@ The API now includes enhanced pagination features to simplify frontend implement
 All search endpoints support the following pagination parameters:
 - `page` - The page number to return (default: 1)
 - `page_size` - Number of results per page (default: 20)
-- `max_results` - Maximum total results to return (default: 1000)
+- `max_results` - Maximum total results to return (default: 200)
 
 The response includes a `pagination` object with the following properties:
 
