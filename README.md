@@ -2,6 +2,9 @@
 
 This is a FastAPI backend for recipe search and ingredient extraction from images, using Google Vertex AI (Gemini) for image analysis and BigQuery for recipe data.
 
+## Repository
+- **GitHub**: https://github.com/unbenivable/recipe-search-backend
+
 ## Features
 - Extract ingredients from food images using Google Vertex AI Gemini
 - Search recipes by ingredients (BigQuery)
