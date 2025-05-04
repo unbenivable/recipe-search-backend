@@ -1,5 +1,5 @@
 # Recipe Search Backend API - With Google Vertex AI
-from fastapi import FastAPI, Request, File, UploadFile, Form
+from fastapi import FastAPI, Request, File, UploadFile, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -20,6 +20,8 @@ from functools import lru_cache
 import hashlib
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import datetime
+from fastapi.responses import JSONResponse
 
 # Simple in-memory cache with TTL
 class TTLCache:
@@ -54,6 +56,59 @@ class TTLCache:
 
 # Initialize cache
 recipe_cache = TTLCache(max_size=200, ttl=1800)  # 30 minute cache
+
+# Global request limiter
+class RequestThrottler:
+    def __init__(self):
+        self.request_count = 0
+        self.result_count = 0
+        self.last_reset = datetime.datetime.now()
+        self.reset_interval = datetime.timedelta(minutes=10)
+        self.ip_timestamps = {}  # Track IPs and their request timestamps
+        
+    def should_throttle(self, client_ip):
+        """Check if we should throttle requests"""
+        now = datetime.datetime.now()
+        
+        # Reset counters periodically
+        if now - self.last_reset > self.reset_interval:
+            self.request_count = 0
+            self.result_count = 0
+            self.last_reset = now
+            self.ip_timestamps = {}
+            print(f"REQUEST COUNTERS RESET. New interval started at {now}")
+        
+        # Limit requests per IP (max 20 requests per minute per IP)
+        ip_history = self.ip_timestamps.get(client_ip, [])
+        ip_history = [ts for ts in ip_history if now - ts < datetime.timedelta(minutes=1)]
+        
+        self.ip_timestamps[client_ip] = ip_history + [now]
+        
+        # Check IP rate limit
+        if len(ip_history) >= 20:
+            print(f"THROTTLING {client_ip}: Made {len(ip_history)} requests in the last minute")
+            return True
+            
+        # Global limits: max 500 requests or 10,000 results per 10-minute window
+        if self.request_count >= 500:
+            print(f"GLOBAL THROTTLING: {self.request_count} requests in the current window")
+            return True
+            
+        if self.result_count >= 10000:
+            print(f"GLOBAL THROTTLING: {self.result_count} results in the current window")
+            return True
+            
+        # Increment request counter
+        self.request_count += 1
+        return False
+        
+    def add_results(self, count):
+        """Add to the result counter"""
+        self.result_count += count
+        print(f"COUNTER UPDATE: {self.request_count} requests, {self.result_count} results in current window")
+
+# Initialize throttler
+throttler = RequestThrottler()
 
 app = FastAPI()
 
@@ -161,9 +216,9 @@ async def health_check_root():
     return {"status": "ok"}
 
 @app.post("/search")
-async def search_recipes(request: SearchRequest):
+async def search_recipes(request: SearchRequest, req: Request):
     # Apply absolute hard limits regardless of what's requested
-    ABSOLUTE_MAX_RESULTS = 100  # Never return more than 100 results total
+    ABSOLUTE_MAX_RESULTS = 50  # Further reduced from 100 to 50 maximum results
     
     user_ingredients = [ing.lower().strip() for ing in request.ingredients]
     page = max(1, min(100, request.page))  # Limit page between 1-100
@@ -171,7 +226,8 @@ async def search_recipes(request: SearchRequest):
     min_matches = request.min_matches
     max_results = min(ABSOLUTE_MAX_RESULTS, request.max_results)
     
-    print(f"SEARCH REQUEST: ingredients={user_ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
+    client_ip = req.state.client_ip
+    print(f"SEARCH REQUEST from {client_ip}: ingredients={user_ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
 
     if not user_ingredients:
         return {"recipes": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
@@ -285,6 +341,9 @@ async def search_recipes(request: SearchRequest):
         query_time = time.time() - start_time
         print(f"Query executed in {query_time:.2f} seconds")
         
+        # Track total results for rate limiting
+        throttler.add_results(len(recipes))
+        
         # Enhanced pagination info for frontend
         pagination = {
             "total": total_count,
@@ -374,7 +433,8 @@ async def search_by_image(
     file: UploadFile = File(...), 
     max_results: int = 200,
     page: int = 1,
-    page_size: int = 20
+    page_size: int = 20,
+    req: Request = None
 ):
     """
     Analyze a food image and search for recipes based on the detected ingredients.
@@ -382,12 +442,13 @@ async def search_by_image(
     This combines the image analysis and recipe search in one convenient endpoint.
     """
     # Apply absolute hard limits
-    ABSOLUTE_MAX_RESULTS = 100
+    ABSOLUTE_MAX_RESULTS = 50
     page = max(1, min(100, page))
     page_size = max(1, min(20, page_size))
     max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
     
-    print(f"IMAGE SEARCH: page={page}, page_size={page_size}, max_results={max_results}")
+    client_ip = req.state.client_ip if req else "unknown"
+    print(f"IMAGE SEARCH from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
     
     # First, analyze the image to get ingredients
     analysis_result = await analyze_image(file)
@@ -487,7 +548,8 @@ async def image_to_recipe(
     file: UploadFile = File(...), 
     max_results: int = 200,
     page: int = 1,
-    page_size: int = 10
+    page_size: int = 10,
+    req: Request = None
 ):
     """
     A comprehensive endpoint that:
@@ -498,12 +560,13 @@ async def image_to_recipe(
     Returns all three results combined.
     """
     # Apply absolute hard limits
-    ABSOLUTE_MAX_RESULTS = 100
+    ABSOLUTE_MAX_RESULTS = 50
     page = max(1, min(100, page))
     page_size = max(1, min(20, page_size))
     max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
     
-    print(f"IMAGE-TO-RECIPE: page={page}, page_size={page_size}, max_results={max_results}")
+    client_ip = req.state.client_ip if req else "unknown"
+    print(f"IMAGE-TO-RECIPE from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
     
     start_time = time.time()
     
@@ -616,6 +679,30 @@ async def pagination_helper(
     }
     
     return pagination
+
+# Create a middleware to get client IP
+@app.middleware("http")
+async def get_client_ip(request: Request, call_next):
+    # Get client IP
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0]
+    else:
+        client_ip = request.client.host
+        
+    # Check if request should be throttled
+    if throttler.should_throttle(client_ip):
+        return JSONResponse(
+            status_code=429, 
+            content={"detail": "Too many requests. Please try again later."}
+        )
+        
+    # Add client IP to request state for use in endpoints
+    request.state.client_ip = client_ip
+    
+    # Continue with the request
+    response = await call_next(request)
+    return response
 
 # Start the server for local testing
 if __name__ == "__main__":

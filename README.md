@@ -125,7 +125,7 @@ The API now includes enhanced pagination features to simplify frontend implement
 All search endpoints support the following pagination parameters:
 - `page` - The page number to return (default: 1)
 - `page_size` - Number of results per page (default: 20)
-- `max_results` - Maximum total results to return (default: 100)
+- `max_results` - Maximum total results to return (default: 50)
 
 The response includes a `pagination` object with the following properties:
 
@@ -159,6 +159,15 @@ This returns an optimized pagination structure for building UI components, inclu
 - Previous/next navigation
 - First/last page links
 - Information about what items are being displayed
+
+### Rate Limiting
+
+The API includes rate limiting to prevent excessive usage:
+- Maximum 20 requests per minute per IP address
+- Maximum 500 requests per 10-minute window globally
+- Maximum 10,000 results per 10-minute window globally
+
+If limits are exceeded, the API will return a 429 status code with a "Too many requests" message.
 
 ## Deployment (Railway)
 - Add `GOOGLE_APPLICATION_CREDENTIALS_JSON` as a Railway environment variable using their secure environment variable storage.
