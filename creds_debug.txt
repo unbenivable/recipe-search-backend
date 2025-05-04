@@ -1,0 +1,1 @@
+{"type":"service_account","project_id":"recipe-data-pipeline","private_key_id":"16af72e14ecdb0f1a9e009449d71d72e8a906172","private_key":"-----BEGIN PRIVATE KEY-----... (truncated)
