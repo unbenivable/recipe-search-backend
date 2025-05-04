@@ -268,13 +268,29 @@ async def search_recipes(request: SearchRequest):
         query_time = time.time() - start_time
         print(f"Query executed in {query_time:.2f} seconds")
         
-        result = {
-            "recipes": recipes, 
-            "query_time_seconds": query_time,
+        # Enhanced pagination info for frontend
+        pagination = {
             "total": total_count,
             "page": page,
             "page_size": page_size,
-            "pages": total_pages
+            "pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+            "next_page": min(page + 1, total_pages) if page < total_pages else None,
+            "prev_page": page - 1 if page > 1 else None,
+            "first_page": 1,
+            "last_page": total_pages,
+            # Generate an array of page numbers for pagination controls
+            "page_numbers": list(range(
+                max(1, page - 2),  # 2 pages before current
+                min(total_pages + 1, page + 3)  # 2 pages after current
+            ))
+        }
+        
+        result = {
+            "recipes": recipes, 
+            "query_time_seconds": query_time,
+            "pagination": pagination
         }
         
         # Cache the result
@@ -337,7 +353,12 @@ async def analyze_image(file: UploadFile = File(...)):
         return {"ingredients": ["tomato", "onion", "garlic"], "error": str(e)}
 
 @app.post("/search-by-image")
-async def search_by_image(file: UploadFile = File(...), max_results: int = 1000):
+async def search_by_image(
+    file: UploadFile = File(...), 
+    max_results: int = 1000,
+    page: int = 1,
+    page_size: int = 20
+):
     """
     Analyze a food image and search for recipes based on the detected ingredients.
     
@@ -348,13 +369,29 @@ async def search_by_image(file: UploadFile = File(...), max_results: int = 1000)
     ingredients = analysis_result.get("ingredients", [])
     
     if not ingredients:
-        return {"recipes": [], "detected_ingredients": []}
+        return {
+            "recipes": [], 
+            "detected_ingredients": [],
+            "pagination": {
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "pages": 0,
+                "has_next": False,
+                "has_prev": False,
+                "next_page": None,
+                "prev_page": None,
+                "first_page": 1,
+                "last_page": 0,
+                "page_numbers": []
+            }
+        }
     
     # Create a SearchRequest to use our optimized search endpoint
     search_request = SearchRequest(
         ingredients=ingredients,
-        page=1,
-        page_size=20,
+        page=page,
+        page_size=page_size,
         min_matches=1,
         max_results=max_results
     )
@@ -365,8 +402,7 @@ async def search_by_image(file: UploadFile = File(...), max_results: int = 1000)
     return {
         "recipes": search_result.get("recipes", []),
         "detected_ingredients": ingredients,
-        "total": search_result.get("total", 0),
-        "pages": search_result.get("pages", 0)
+        "pagination": search_result.get("pagination", {})
     }
 
 @app.post("/similar-recipe-images")
@@ -422,7 +458,12 @@ async def search_similar_recipe_images(
         return {"error": str(e)}
 
 @app.post("/image-to-recipe")
-async def image_to_recipe(file: UploadFile = File(...), max_results: int = 1000):
+async def image_to_recipe(
+    file: UploadFile = File(...), 
+    max_results: int = 1000,
+    page: int = 1,
+    page_size: int = 10
+):
     """
     A comprehensive endpoint that:
     1. Analyzes the food image to identify ingredients
@@ -438,7 +479,7 @@ async def image_to_recipe(file: UploadFile = File(...), max_results: int = 1000)
     
     # Create a cache key for this image
     image_hash = hashlib.md5(contents).hexdigest()
-    cache_key = f"img2recipe_{image_hash}_{max_results}"  # Include max_results in cache key
+    cache_key = f"img2recipe_{image_hash}_{max_results}_{page}_{page_size}"  # Include pagination in cache key
     
     # Check cache first
     cached_result = recipe_cache.get(cache_key)
@@ -468,8 +509,8 @@ async def image_to_recipe(file: UploadFile = File(...), max_results: int = 1000)
     # For recipe search, we'll create a search request
     search_request = SearchRequest(
         ingredients=ingredients,
-        page=1,
-        page_size=10,
+        page=page,
+        page_size=page_size,
         min_matches=1,
         max_results=max_results
     )
@@ -488,13 +529,60 @@ async def image_to_recipe(file: UploadFile = File(...), max_results: int = 1000)
         "detected_ingredients": ingredients,
         "recipes_by_ingredients": recipes_by_ingredients,
         "similar_looking_recipes": similar_recipes,
-        "processing_time_seconds": time.time() - start_time
+        "processing_time_seconds": time.time() - start_time,
+        "pagination": recipes_result.get("pagination", {})
     }
     
     # Cache the result
     recipe_cache.set(cache_key, result)
     
     return result
+
+@app.get("/api/pagination-helper")
+async def pagination_helper(
+    current_page: int = 1,
+    total_pages: int = 1,
+    items_per_page: int = 20,
+    total_items: int = 0,
+    max_page_buttons: int = 5
+):
+    """
+    Helper endpoint to generate pagination navigation for the frontend.
+    
+    Returns a structure with information for building a pagination UI component.
+    """
+    # Calculate visible page range
+    half_max = max_page_buttons // 2
+    start_page = max(1, current_page - half_max)
+    end_page = min(total_pages, start_page + max_page_buttons - 1)
+    
+    # Adjust start if we're near the end
+    if end_page == total_pages:
+        start_page = max(1, end_page - max_page_buttons + 1)
+    
+    # Generate page numbers
+    page_numbers = list(range(start_page, end_page + 1))
+    
+    # Generate navigation links
+    pagination = {
+        "current_page": current_page,
+        "total_pages": total_pages,
+        "items_per_page": items_per_page,
+        "total_items": total_items,
+        "visible_pages": page_numbers,
+        "has_previous": current_page > 1,
+        "has_next": current_page < total_pages,
+        "previous_page": current_page - 1 if current_page > 1 else None,
+        "next_page": current_page + 1 if current_page < total_pages else None,
+        "first_page": 1,
+        "last_page": total_pages,
+        "showing_items": {
+            "from": ((current_page - 1) * items_per_page) + 1 if total_items > 0 else 0,
+            "to": min(current_page * items_per_page, total_items)
+        }
+    }
+    
+    return pagination
 
 # Start the server for local testing
 if __name__ == "__main__":
