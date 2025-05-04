@@ -494,7 +494,7 @@ async def search_by_image(
     )
     
     # Use the existing search function
-    search_result = await search_recipes(search_request)
+    search_result = await search_recipes(search_request, req)
     
     return {
         "recipes": search_result.get("recipes", []),
@@ -622,7 +622,7 @@ async def image_to_recipe(
     )
     
     # Start recipe search immediately
-    recipes_task = asyncio.create_task(search_recipes(search_request))
+    recipes_task = asyncio.create_task(search_recipes(search_request, req))
     
     # Wait for both remaining tasks to complete
     similar_result, recipes_result = await asyncio.gather(similar_task, recipes_task)
