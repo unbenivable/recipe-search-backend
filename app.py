@@ -118,7 +118,9 @@ throttler = RequestThrottler()
 app = FastAPI()
 
 allowed_origins = [
-    "https://recipe-search-frontend.vercel.app"
+    "https://recipe-search-frontend.vercel.app",
+    "https://ingreddit.com",
+    "https://www.ingreddit.com"
 ]
 if os.environ.get("ENV") == "development":
     allowed_origins.append("http://localhost:3000")
