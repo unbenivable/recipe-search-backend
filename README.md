@@ -116,6 +116,50 @@ A comprehensive endpoint that combines ingredient analysis and visual similarity
 }
 ```
 
+## Pagination Support
+
+The API now includes enhanced pagination features to simplify frontend implementation.
+
+### Using Pagination
+
+All search endpoints support the following pagination parameters:
+- `page` - The page number to return (default: 1)
+- `page_size` - Number of results per page (default: 20)
+- `max_results` - Maximum total results to return (default: 1000)
+
+The response includes a `pagination` object with the following properties:
+
+```json
+"pagination": {
+  "total": 120,         // Total number of matching results
+  "page": 2,            // Current page
+  "page_size": 20,      // Results per page
+  "pages": 6,           // Total number of pages
+  "has_next": true,     // Whether there is a next page
+  "has_prev": true,     // Whether there is a previous page
+  "next_page": 3,       // Next page number
+  "prev_page": 1,       // Previous page number
+  "first_page": 1,      // First page number
+  "last_page": 6,       // Last page number
+  "page_numbers": [1,2,3,4] // Suggested page numbers for navigation
+}
+```
+
+### Pagination Helper Endpoint
+
+For advanced pagination UI needs, use the `/api/pagination-helper` endpoint.
+
+Example request:
+```
+GET /api/pagination-helper?current_page=3&total_pages=10&items_per_page=20&total_items=200&max_page_buttons=5
+```
+
+This returns an optimized pagination structure for building UI components, including:
+- Visible page numbers for displaying page buttons
+- Previous/next navigation
+- First/last page links
+- Information about what items are being displayed
+
 ## Deployment (Railway)
 - Add `GOOGLE_APPLICATION_CREDENTIALS_JSON` as a Railway environment variable using their secure environment variable storage.
 - Deploy as a Python service.
