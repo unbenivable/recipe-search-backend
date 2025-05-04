@@ -11,6 +11,7 @@ This is a FastAPI backend for recipe search and ingredient extraction from image
 - Visual recipe search using Vertex AI multimodal embeddings
 - Comprehensive recipe recommendations combining ingredient and visual similarity
 - Ready for deployment on Railway
+- Optimized for high-volume search with batch processing and intelligent caching
 
 ## Deployment URLs
 - **Backend (Railway)**: https://recipe-search-backend.railway.app
@@ -54,123 +55,66 @@ See [README.local.md](README.local.md) for detailed instructions on local testin
 
 ## API Endpoints
 
-### `POST /analyze-image`
-Upload a food image and get a list of detected ingredients.
+### `/search` - Search for recipes by ingredients
+- **Method**: POST
+- **Parameters**: 
+  - `ingredients`: List of ingredient strings
+  - `page`: Page number (default: 1)
+  - `page_size`: Results per page (default: 20)
+  - `min_matches`: Minimum number of matching ingredients (default: 1)
+  - `max_results`: Maximum total results to return (default: 100)
 
-**Request:**
-- `file`: image file (form-data)
+### `/batch-search` - Process multiple searches in one request
+- **Method**: POST
+- **Parameters**:
+  - `ingredientSets`: List of ingredient lists (maximum 5 sets)
+  - `page`: Page number (default: 1)
+  - `page_size`: Results per page (default: 20)
+  - `min_matches`: Minimum number of matching ingredients (default: 1)
+  - `max_results`: Maximum total results to return (default: 100)
+- **Description**: Optimized endpoint for reducing frontend request volume by processing multiple searches in a single API call
 
-**Response:**
-```json
-{
-  "ingredients": ["ingredient1", "ingredient2", ...]
-}
-```
+### `/analyze-image` - Extract ingredients from a food image
+- **Method**: POST
+- **Parameters**: Image file (multipart/form-data)
 
-### `POST /similar-recipe-images`
-Upload a food image and get visually similar recipes.
+### `/visual-search` - Find visually similar recipes
+- **Method**: POST
+- **Parameters**: Image file (multipart/form-data)
 
-**Request:**
-- `file`: image file (form-data)
-- `limit`: (optional) maximum number of results to return
-
-**Response:**
-```json
-{
-  "similar_recipes": [
-    {
-      "title": "Recipe Title",
-      "similarity_score": 0.92,
-      "image_url": "https://example.com/recipe.jpg",
-      "recipe_id": "recipe123"
-    },
-    ...
-  ]
-}
-```
-
-### `POST /image-to-recipe`
-A comprehensive endpoint that combines ingredient analysis and visual similarity.
-
-**Request:**
-- `file`: image file (form-data)
-
-**Response:**
-```json
-{
-  "detected_ingredients": ["ingredient1", "ingredient2", ...],
-  "recipes_by_ingredients": [
-    {
-      "title": "Recipe Title",
-      "ingredients": ["ingredient1", "ingredient2", ...],
-      "directions": ["Step 1", "Step 2", ...]
-    },
-    ...
-  ],
-  "similar_looking_recipes": [
-    {
-      "title": "Recipe Title",
-      "similarity_score": 0.92,
-      "image_url": "https://example.com/recipe.jpg",
-      "recipe_id": "recipe123"
-    },
-    ...
-  ]
-}
-```
-
-## Pagination Support
-
-The API now includes enhanced pagination features to simplify frontend implementation.
-
-### Using Pagination
-
-All search endpoints support the following pagination parameters:
-- `page` - The page number to return (default: 1)
-- `page_size` - Number of results per page (default: 20)
-- `max_results` - Maximum total results to return (default: 50)
-
-The response includes a `pagination` object with the following properties:
-
-```json
-"pagination": {
-  "total": 120,         // Total number of matching results
-  "page": 2,            // Current page
-  "page_size": 20,      // Results per page
-  "pages": 6,           // Total number of pages
-  "has_next": true,     // Whether there is a next page
-  "has_prev": true,     // Whether there is a previous page
-  "next_page": 3,       // Next page number
-  "prev_page": 1,       // Previous page number
-  "first_page": 1,      // First page number
-  "last_page": 6,       // Last page number
-  "page_numbers": [1,2,3,4] // Suggested page numbers for navigation
-}
-```
-
-### Pagination Helper Endpoint
-
-For advanced pagination UI needs, use the `/api/pagination-helper` endpoint.
-
-Example request:
-```
-GET /api/pagination-helper?current_page=3&total_pages=10&items_per_page=20&total_items=200&max_page_buttons=5
-```
-
-This returns an optimized pagination structure for building UI components, including:
-- Visible page numbers for displaying page buttons
-- Previous/next navigation
-- First/last page links
-- Information about what items are being displayed
+### `/health` - Healthcheck endpoint
+- **Method**: GET
 
 ### Rate Limiting
 
 The API includes rate limiting to prevent excessive usage:
-- Maximum 20 requests per minute per IP address
+- Maximum 10 requests per minute per IP address
 - Maximum 500 requests per 10-minute window globally
 - Maximum 1,000 results per 10-minute window globally
+- Duplicate searches within 5 seconds are throttled
+- Batch searches limited to 5 ingredient sets per request
 
 If limits are exceeded, the API will return a 429 status code with a "Too many requests" message.
+
+## Performance Optimization
+
+This API is designed for high-performance with multiple optimization techniques:
+- Intelligent two-level caching (in-memory TTL cache + query-level caching)
+- Rate limiting to prevent abuse and ensure fair usage
+- Batch processing to reduce request volume
+- Minimum length requirements for search terms
+- Duplicate search detection to prevent hammering
+
+## Frontend Integration Best Practices
+
+To achieve optimal performance when integrating with the frontend:
+1. **Implement debouncing** - Wait until user stops typing before sending requests (min 500ms delay)
+2. **Add minimum character limits** - Only search after 2+ characters are entered
+3. **Use batch searching** - Combine multiple searches into fewer requests
+4. **Implement client-side caching** - Cache results to reduce duplicate queries
+5. **Optimize React component lifecycle** - Prevent unnecessary re-renders
+
+See the `frontend-optimizations.js` file for code examples of these techniques.
 
 ## Deployment (Railway)
 - Add `GOOGLE_APPLICATION_CREDENTIALS_JSON` as a Railway environment variable using their secure environment variable storage.
