@@ -131,7 +131,7 @@ class SearchRequest(BaseModel):
     page: int = 1
     page_size: int = 20
     min_matches: int = 1
-    max_results: int = 1000  # Maximum total results to return
+    max_results: int = 200  # Reduced from 1000 to 200 maximum results
 
 @app.get("/")
 async def root():
@@ -229,9 +229,12 @@ async def search_recipes(request: SearchRequest):
         # First, get the total count for pagination
         count_query = f"""
             SELECT COUNT(*) as total
-            FROM `recipe-data-pipeline.recipes.structured_recipes`
-            WHERE ({score_expression}) >= {min_matches}
-            LIMIT {request.max_results}  -- Apply global result limit
+            FROM (
+                SELECT title
+                FROM `recipe-data-pipeline.recipes.structured_recipes`
+                WHERE ({score_expression}) >= {min_matches}
+                LIMIT {min(request.max_results, 200)}  -- Hard limit to prevent excessive results
+            )
         """
         
         count_result = client.query(count_query).result()
@@ -242,7 +245,10 @@ async def search_recipes(request: SearchRequest):
         offset = min((page - 1) * page_size, total_count - 1)
         
         # Adjust page_size to not exceed maximum results
-        effective_page_size = min(page_size, request.max_results - offset)
+        effective_page_size = min(page_size, min(request.max_results, 200) - offset)
+        
+        # Add debug logging
+        print(f"Search query: {len(user_ingredients)} ingredients, page {page}, limit {effective_page_size}, offset {offset}, max_results: {request.max_results}")
         
         # Main query with pagination
         query = f"""
@@ -355,7 +361,7 @@ async def analyze_image(file: UploadFile = File(...)):
 @app.post("/search-by-image")
 async def search_by_image(
     file: UploadFile = File(...), 
-    max_results: int = 1000,
+    max_results: int = 200,
     page: int = 1,
     page_size: int = 20
 ):
@@ -460,7 +466,7 @@ async def search_similar_recipe_images(
 @app.post("/image-to-recipe")
 async def image_to_recipe(
     file: UploadFile = File(...), 
-    max_results: int = 1000,
+    max_results: int = 200,
     page: int = 1,
     page_size: int = 10
 ):
