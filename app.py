@@ -216,6 +216,16 @@ class SearchRequest(BaseModel):
     page_size: int = 20
     min_matches: int = 1
     max_results: int = 100  # Reduced from 200 to 100 maximum results
+    matchAll: Optional[bool] = None  # Added for frontend compatibility
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        # If matchAll is provided and True, set min_matches to match all ingredients
+        if self.matchAll is not None:
+            if self.matchAll and len(self.ingredients) > 0:
+                self.min_matches = len(self.ingredients)
+            elif not self.matchAll:
+                self.min_matches = 1
 
 # Use environment variable for ABSOLUTE_MAX_RESULTS
 ABSOLUTE_MAX_RESULTS = int(os.environ.get("MAX_RESULTS", 50))
