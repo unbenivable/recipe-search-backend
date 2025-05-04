@@ -36,4 +36,5 @@ ENV/
 .idea/
 .vscode/
 *.swp
-*.swo 
+*.swo creds_debug.txt
+fixed_creds.txt
