@@ -131,7 +131,7 @@ class SearchRequest(BaseModel):
     page: int = 1
     page_size: int = 20
     min_matches: int = 1
-    max_results: int = 200  # Reduced from 1000 to 200 maximum results
+    max_results: int = 100  # Reduced from 200 to 100 maximum results
 
 @app.get("/")
 async def root():
@@ -162,10 +162,16 @@ async def health_check_root():
 
 @app.post("/search")
 async def search_recipes(request: SearchRequest):
+    # Apply absolute hard limits regardless of what's requested
+    ABSOLUTE_MAX_RESULTS = 100  # Never return more than 100 results total
+    
     user_ingredients = [ing.lower().strip() for ing in request.ingredients]
-    page = request.page
-    page_size = request.page_size
+    page = max(1, min(100, request.page))  # Limit page between 1-100
+    page_size = max(1, min(20, request.page_size))  # Limit page_size between 1-20
     min_matches = request.min_matches
+    max_results = min(ABSOLUTE_MAX_RESULTS, request.max_results)
+    
+    print(f"SEARCH REQUEST: ingredients={user_ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
 
     if not user_ingredients:
         return {"recipes": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
@@ -233,22 +239,22 @@ async def search_recipes(request: SearchRequest):
                 SELECT title
                 FROM `recipe-data-pipeline.recipes.structured_recipes`
                 WHERE ({score_expression}) >= {min_matches}
-                LIMIT {min(request.max_results, 200)}  -- Hard limit to prevent excessive results
+                LIMIT {ABSOLUTE_MAX_RESULTS}  -- Absolute hard limit
             )
         """
         
         count_result = client.query(count_query).result()
-        total_count = min(next(iter(count_result)).total, request.max_results)  # Apply max result limit
+        total_count = min(next(iter(count_result)).total, ABSOLUTE_MAX_RESULTS)  # Apply max result limit
         total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
         
         # Calculate offset for pagination, ensuring we don't exceed the max_results
         offset = min((page - 1) * page_size, total_count - 1)
         
         # Adjust page_size to not exceed maximum results
-        effective_page_size = min(page_size, min(request.max_results, 200) - offset)
+        effective_page_size = min(page_size, ABSOLUTE_MAX_RESULTS - offset)
         
         # Add debug logging
-        print(f"Search query: {len(user_ingredients)} ingredients, page {page}, limit {effective_page_size}, offset {offset}, max_results: {request.max_results}")
+        print(f"SQL QUERY: ingredients={len(user_ingredients)}, page={page}, limit={effective_page_size}, offset={offset}, max_results={max_results}")
         
         # Main query with pagination
         query = f"""
@@ -264,6 +270,11 @@ async def search_recipes(request: SearchRequest):
 
         recipes = []
         for row in results:
+            # Only add up to our absolute max
+            if len(recipes) >= ABSOLUTE_MAX_RESULTS:
+                print(f"WARNING: Truncating results at {ABSOLUTE_MAX_RESULTS}")
+                break
+                
             recipes.append({
                 "title": row.title,
                 "ingredients": row.ingredients,
@@ -294,7 +305,7 @@ async def search_recipes(request: SearchRequest):
         }
         
         result = {
-            "recipes": recipes, 
+            "recipes": recipes[:ABSOLUTE_MAX_RESULTS],  # Final safety check
             "query_time_seconds": query_time,
             "pagination": pagination
         }
@@ -370,6 +381,14 @@ async def search_by_image(
     
     This combines the image analysis and recipe search in one convenient endpoint.
     """
+    # Apply absolute hard limits
+    ABSOLUTE_MAX_RESULTS = 100
+    page = max(1, min(100, page))
+    page_size = max(1, min(20, page_size))
+    max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
+    
+    print(f"IMAGE SEARCH: page={page}, page_size={page_size}, max_results={max_results}")
+    
     # First, analyze the image to get ingredients
     analysis_result = await analyze_image(file)
     ingredients = analysis_result.get("ingredients", [])
@@ -478,6 +497,14 @@ async def image_to_recipe(
     
     Returns all three results combined.
     """
+    # Apply absolute hard limits
+    ABSOLUTE_MAX_RESULTS = 100
+    page = max(1, min(100, page))
+    page_size = max(1, min(20, page_size))
+    max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
+    
+    print(f"IMAGE-TO-RECIPE: page={page}, page_size={page_size}, max_results={max_results}")
+    
     start_time = time.time()
     
     # First, analyze the image to get ingredients
