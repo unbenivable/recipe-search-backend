@@ -59,8 +59,8 @@ class TTLCache:
     def clear(self):
         self.cache.clear()
 
-# Initialize cache
-recipe_cache = TTLCache(max_size=200, ttl=1800)  # 30 minute cache
+# Initialize cache with longer TTL and larger size
+recipe_cache = TTLCache(max_size=500, ttl=3600)  # 1 hour cache, 500 items (increased from 30 min, 200 items)
 
 # Global request limiter
 class RequestThrottler:
@@ -70,8 +70,9 @@ class RequestThrottler:
         self.last_reset = datetime.datetime.now()
         self.reset_interval = datetime.timedelta(minutes=10)
         self.ip_timestamps = {}  # Track IPs and their request timestamps
+        self.search_term_timestamps = {}  # Track recent search terms to prevent duplicates
         
-    def should_throttle(self, client_ip):
+    def should_throttle(self, client_ip, search_term=None):
         """Check if we should throttle requests"""
         now = datetime.datetime.now()
         
@@ -81,6 +82,7 @@ class RequestThrottler:
             self.result_count = 0
             self.last_reset = now
             self.ip_timestamps = {}
+            self.search_term_timestamps = {}
             logger.info(f"REQUEST COUNTERS RESET. New interval started at {now}")
         
         # Limit requests per IP (max 20 requests per minute per IP)
@@ -89,10 +91,24 @@ class RequestThrottler:
         
         self.ip_timestamps[client_ip] = ip_history + [now]
         
-        # Check IP rate limit
-        if len(ip_history) >= 20:
+        # Check IP rate limit - stricter limit (10 per minute instead of 20)
+        if len(ip_history) >= 10:
             logger.info(f"THROTTLING {client_ip}: Made {len(ip_history)} requests in the last minute")
             return True
+            
+        # If search term is provided, check for duplicate searches
+        if search_term:
+            # Create a composite key of IP + search term
+            key = f"{client_ip}:{search_term}"
+            last_search_time = self.search_term_timestamps.get(key)
+            
+            # If the same search was made in the last 5 seconds, throttle
+            if last_search_time and (now - last_search_time < datetime.timedelta(seconds=5)):
+                logger.info(f"THROTTLING {client_ip}: Duplicate search for '{search_term}' within 5 seconds")
+                return True
+                
+            # Update the timestamp for this search term
+            self.search_term_timestamps[key] = now
             
         # Global limits: max 500 requests or 1,000 results per 10-minute window
         if self.request_count >= 500:
@@ -204,6 +220,14 @@ class SearchRequest(BaseModel):
 # Use environment variable for ABSOLUTE_MAX_RESULTS
 ABSOLUTE_MAX_RESULTS = int(os.environ.get("MAX_RESULTS", 50))
 
+# Batch search request model
+class BatchSearchRequest(BaseModel):
+    ingredientSets: List[List[str]]
+    page: int = 1
+    page_size: int = 20
+    min_matches: int = 1
+    max_results: int = 100
+
 @app.get("/")
 async def root():
     """
@@ -243,12 +267,30 @@ async def search_recipes(request: SearchRequest, req: Request):
     client_ip = req.state.client_ip
     logger.info(f"SEARCH REQUEST from {client_ip}: ingredients={request.ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
 
-    if not request.ingredients:
-        return {"recipes": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
+    # Require at least 2 characters in any ingredient for search
+    if not request.ingredients or any(len(ing.strip()) < 2 for ing in request.ingredients):
+        return {
+            "recipes": [], 
+            "total": 0, 
+            "page": page, 
+            "page_size": page_size, 
+            "pages": 0,
+            "error": "Please enter ingredients with at least 2 characters each"
+        }
+    
+    # Create a search term string for throttling (combine all ingredients)
+    search_term = ",".join(sorted([ing.lower().strip() for ing in request.ingredients]))
+    
+    # Check if we should throttle this request including the search term
+    if throttler.should_throttle(client_ip, search_term):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many similar requests. Please try again later."}
+        )
     
     # Create a cache key from the search parameters
     cache_params = {
-        "ingredients": sorted(request.ingredients),
+        "ingredients": sorted([ing.lower().strip() for ing in request.ingredients]),
         "page": page, 
         "page_size": page_size,
         "min_matches": min_matches
@@ -715,6 +757,61 @@ async def get_client_ip(request: Request, call_next):
     # Continue with the request
     response = await call_next(request)
     return response
+
+@app.post("/batch-search")
+async def batch_search_recipes(request: BatchSearchRequest, req: Request):
+    """
+    Process multiple search requests in a single API call to reduce frontend request volume.
+    Each set of ingredients is processed as a separate search, but all within one request.
+    """
+    client_ip = req.state.client_ip
+    logger.info(f"BATCH SEARCH from {client_ip}: {len(request.ingredientSets)} ingredient sets")
+    
+    # Apply global rate limiting
+    if throttler.should_throttle(client_ip):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Please try again later."}
+        )
+    
+    # Limit the number of searches in a batch to prevent abuse
+    max_batch_size = 5
+    if len(request.ingredientSets) > max_batch_size:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Maximum batch size is {max_batch_size} searches"}
+        )
+    
+    results = {}
+    
+    # Process each ingredient set
+    for idx, ingredients in enumerate(request.ingredientSets):
+        # Skip empty ingredient sets
+        if not ingredients:
+            results[f"set_{idx}"] = {"recipes": [], "total": 0}
+            continue
+            
+        # Create a search request for this ingredient set
+        search_request = SearchRequest(
+            ingredients=ingredients,
+            page=request.page,
+            page_size=request.page_size,
+            min_matches=request.min_matches,
+            max_results=request.max_results
+        )
+        
+        # Use the existing search function but without additional throttling
+        # We've already applied throttling at the batch level
+        search_result = await search_recipes(search_request, req)
+        
+        # Add to results
+        results[f"set_{idx}"] = search_result
+    
+    # Return all results
+    return {
+        "results": results,
+        "count": len(request.ingredientSets)
+    }
 
 # Start the server for local testing
 if __name__ == "__main__":
