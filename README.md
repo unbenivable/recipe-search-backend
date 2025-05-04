@@ -165,7 +165,7 @@ This returns an optimized pagination structure for building UI components, inclu
 The API includes rate limiting to prevent excessive usage:
 - Maximum 20 requests per minute per IP address
 - Maximum 500 requests per 10-minute window globally
-- Maximum 10,000 results per 10-minute window globally
+- Maximum 1,000 results per 10-minute window globally
 
 If limits are exceeded, the API will return a 429 status code with a "Too many requests" message.
 

@@ -89,12 +89,12 @@ class RequestThrottler:
             print(f"THROTTLING {client_ip}: Made {len(ip_history)} requests in the last minute")
             return True
             
-        # Global limits: max 500 requests or 10,000 results per 10-minute window
+        # Global limits: max 500 requests or 1,000 results per 10-minute window
         if self.request_count >= 500:
             print(f"GLOBAL THROTTLING: {self.request_count} requests in the current window")
             return True
             
-        if self.result_count >= 10000:
+        if self.result_count >= 1000:
             print(f"GLOBAL THROTTLING: {self.result_count} results in the current window")
             return True
             
