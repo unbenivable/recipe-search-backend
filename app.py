@@ -28,6 +28,25 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize FastAPI app
+app = FastAPI()
+
+allowed_origins = [
+    "https://recipe-search-frontend.vercel.app",
+    "https://ingreddit.com",
+    "https://www.ingreddit.com"
+]
+if os.environ.get("ENV") == "development":
+    allowed_origins.append("http://localhost:3000")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Simple in-memory cache with TTL
 class TTLCache:
     def __init__(self, max_size=100, ttl=3600):  # 1 hour default TTL
@@ -130,24 +149,6 @@ class RequestThrottler:
 
 # Initialize throttler
 throttler = RequestThrottler()
-
-app = FastAPI()
-
-allowed_origins = [
-    "https://recipe-search-frontend.vercel.app",
-    "https://ingreddit.com",
-    "https://www.ingreddit.com"
-]
-if os.environ.get("ENV") == "development":
-    allowed_origins.append("http://localhost:3000")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Initialize Google Cloud clients
 client = None
@@ -342,6 +343,10 @@ async def search_recipes(request: SearchRequest, req: Request):
     try:
         start_time = time.time()
         
+        # Check if client is available
+        if client is None:
+            raise Exception("BigQuery client is not available")
+            
         # Optimize query: Use array contains for better performance
         # Build optimized clauses for each ingredient
         match_clauses = []
