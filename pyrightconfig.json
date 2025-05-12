@@ -1,0 +1,9 @@
+{
+  "reportMissingImports": false,
+  "reportAttributeAccessIssue": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnusedImport": "warning",
+  "typeCheckingMode": "basic"
+} 
