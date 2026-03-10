@@ -1,12 +1,10 @@
 # Recipe Search Backend API - With Google Vertex AI
-from fastapi import FastAPI, Request, File, UploadFile, Form, HTTPException, Depends
+from fastapi import FastAPI, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import os
 import json
-import base64
-import sys
 import uvicorn
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -14,12 +12,9 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, Part
 from vertexai.vision_models import Image
 from vertexai.vision_models import MultiModalEmbeddingModel
-from io import BytesIO
 import time
-from functools import lru_cache
 import hashlib
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import datetime
 from fastapi.responses import JSONResponse
 import logging
@@ -467,37 +462,66 @@ async def search_recipes(request: SearchRequest, req: Request):
 async def analyze_image(file: UploadFile = File(...)):
     """
     Analyze a food image to extract ingredients using Google Vertex AI Gemini.
-    
+
     Returns a list of identified ingredients that can be used for recipe search.
     """
-    # Read the image file
     contents = await file.read()
-    
+
+    if not contents:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Empty file uploaded"}
+        )
+
+    # Validate content type
+    allowed_types = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+    content_type = file.content_type or ""
+    if content_type not in allowed_types:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unsupported image format: {content_type}. Use JPEG, PNG, or WebP."}
+        )
+
     try:
-        # Initialize Gemini model
-        model = GenerativeModel("gemini-pro-vision")
-        
-        # Create the prompt and image part
-        prompt = "Output ONLY food items and ingredients visible in the image. No descriptions, no explanations, just the food items themselves. Format as a simple comma-separated list."
-        image_part = Part.from_data(mime_type=file.content_type, data=contents)
-        
-        # Generate content
+        model = GenerativeModel("gemini-2.0-flash-lite")
+
+        prompt = "List only the food ingredients you can see in this image, one per line, nothing else."
+        image_part = Part.from_data(mime_type=content_type, data=contents)
+
         response = model.generate_content([prompt, image_part])
-        
-        # Extract ingredients from the response
+
         ingredients_text = response.text
-        
-        # Parse the comma-separated list into individual ingredients
-        ingredients = [item.strip() for item in ingredients_text.split(',')]
-        
-        # Remove any empty strings or bullet points
-        ingredients = [item.replace('-', '').strip() for item in ingredients if item.strip()]
-        
-        return {"ingredients": ingredients}
+
+        # Parse line-separated list into individual ingredients
+        ingredients = []
+        for line in ingredients_text.split('\n'):
+            # Strip whitespace, bullets, dashes, numbers, and asterisks
+            cleaned = line.strip().lstrip('-*•').strip()
+            # Remove leading numbers like "1. " or "1) "
+            if cleaned and cleaned[0].isdigit():
+                for sep in ['. ', ') ', ': ', ' ']:
+                    idx = cleaned.find(sep)
+                    if idx != -1 and idx < 4:
+                        cleaned = cleaned[idx + len(sep):]
+                        break
+            cleaned = cleaned.strip()
+            if cleaned and len(cleaned) > 1:
+                ingredients.append(cleaned)
+
+        if not ingredients:
+            return JSONResponse(
+                status_code=200,
+                content={"ingredients": [], "message": "No food ingredients detected. Try a clearer photo of food items."}
+            )
+
+        # Cap at 15 ingredients
+        return {"ingredients": ingredients[:15]}
     except Exception as e:
         logger.error(f"Error analyzing image: {e}")
-        # Return mock data for testing if analysis fails
-        return {"ingredients": ["tomato", "onion", "garlic"], "error": str(e)}
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to analyze image: {str(e)}"}
+        )
 
 @app.post("/search-by-image")
 async def search_by_image(
@@ -522,8 +546,13 @@ async def search_by_image(
     
     # First, analyze the image to get ingredients
     analysis_result = await analyze_image(file)
+
+    # If analyze_image returned a JSONResponse (error), propagate it
+    if isinstance(analysis_result, JSONResponse):
+        return analysis_result
+
     ingredients = analysis_result.get("ingredients", [])
-    
+
     if not ingredients:
         return {
             "recipes": [], 
@@ -669,6 +698,12 @@ async def image_to_recipe(
     
     # Wait for analysis to complete first (we need ingredients for recipe search)
     analysis_result = await analysis_task
+
+    # If analyze_image returned a JSONResponse (error), propagate it
+    if isinstance(analysis_result, JSONResponse):
+        similar_task.cancel()
+        return analysis_result
+
     ingredients = analysis_result.get("ingredients", [])
     
     # For recipe search, we'll create a search request
