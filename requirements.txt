@@ -5,9 +5,7 @@ pydantic
 python-multipart
 pillow
 opencv-python
-google-cloud-bigquery
 google-cloud-aiplatform
-google-cloud-vision
 google-auth
 google-api-core
 requests

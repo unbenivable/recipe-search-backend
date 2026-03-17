@@ -6,7 +6,6 @@ from typing import List, Optional
 import os
 import json
 import uvicorn
-from google.cloud import bigquery
 from google.oauth2 import service_account
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
@@ -145,55 +144,35 @@ class RequestThrottler:
 # Initialize throttler
 throttler = RequestThrottler()
 
-# Initialize Google Cloud clients
-client = None
+# Initialize Google Cloud / Vertex AI
 try:
-    # Use environment variable for credentials
     logger.info("Using credentials from environment variable")
     creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}")
-    
+
     # Clean up the credentials string
-    # Remove any single quotes at beginning and end (common in .env files)
     if creds_str.startswith("'") and creds_str.endswith("'"):
         creds_str = creds_str[1:-1]
     elif creds_str.startswith('"') and creds_str.endswith('"'):
         creds_str = creds_str[1:-1]
-        
-    # Remove any line breaks that might have been introduced
     creds_str = creds_str.replace('\n', '\\n')
-    
-    # Print first few characters to debug (but don't expose full credentials)
+
     if len(creds_str) > 0:
         logger.info(f"Credentials string length: {len(creds_str)}")
         if len(creds_str) < 10:
             logger.warning("WARNING: Credentials string is too short")
-        
-    try:
-        credentials_info = json.loads(creds_str)
-        logger.info("Successfully parsed credentials JSON")
-    except json.JSONDecodeError as je:
-        logger.error(f"JSON parse error at position {je.pos}, line {je.lineno}, column {je.colno}")
-        raise
-    
-    # Initialize BigQuery client
+
+    credentials_info = json.loads(creds_str)
     credentials = service_account.Credentials.from_service_account_info(credentials_info)
-    client = bigquery.Client(credentials=credentials, project="recipe-data-pipeline")
-    
-    # Initialize Vertex AI
+
     vertexai.init(
         project="recipe-data-pipeline",
         location="us-central1",
         credentials=credentials
     )
-    
-    logger.info(f"Successfully initialized Google Cloud clients for project: recipe-data-pipeline")
-except json.JSONDecodeError as je:
-    logger.warning(f"Warning: Invalid JSON in credentials: {je}")
-    logger.warning("Check your GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable format")
-    logger.warning("Using mock data for local testing")
+
+    logger.info("Successfully initialized Vertex AI for project: recipe-data-pipeline")
 except Exception as e:
-    logger.warning(f"Warning: Unable to initialize Google Cloud clients: {e}")
-    logger.warning("Using mock data for local testing")
+    logger.warning(f"Warning: Unable to initialize Vertex AI: {e}")
 
 # Load the multimodal embedding model for image search
 embedding_model = None
@@ -264,199 +243,123 @@ async def health_check_root():
 
 @app.post("/search")
 async def search_recipes(request: SearchRequest, req: Request):
-    # Apply absolute hard limits regardless of what's requested
-    page = max(1, min(100, request.page))  # Limit page between 1-100
-    page_size = max(1, min(20, request.page_size))  # Limit page_size between 1-20
-    min_matches = request.min_matches
-    max_results = min(ABSOLUTE_MAX_RESULTS, request.max_results)
-    
-    client_ip = req.state.client_ip
-    logger.info(f"SEARCH REQUEST from {client_ip}: ingredients={request.ingredients}, page={page}, page_size={page_size}, max_results={max_results}")
+    page = max(1, min(100, request.page))
+    page_size = max(1, min(20, request.page_size))
 
-    # Require at least 2 characters in any ingredient for search
+    client_ip = req.state.client_ip
+    logger.info(f"SEARCH REQUEST from {client_ip}: ingredients={request.ingredients}, page={page}, page_size={page_size}")
+
     if not request.ingredients or any(len(ing.strip()) < 2 for ing in request.ingredients):
         return {
-            "recipes": [], 
-            "total": 0, 
-            "page": page, 
-            "page_size": page_size, 
+            "recipes": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
             "pages": 0,
             "error": "Please enter ingredients with at least 2 characters each"
         }
-    
-    # Create a search term string for throttling (combine all ingredients)
+
     search_term = ",".join(sorted([ing.lower().strip() for ing in request.ingredients]))
-    
-    # Check if we should throttle this request including the search term
+
     if throttler.should_throttle(client_ip, search_term):
         return JSONResponse(
             status_code=429,
             content={"detail": "Too many similar requests. Please try again later."}
         )
-    
-    # Create a cache key from the search parameters
+
     cache_params = {
         "ingredients": sorted([ing.lower().strip() for ing in request.ingredients]),
-        "page": page, 
-        "page_size": page_size,
-        "min_matches": min_matches
+        "page": page
     }
     cache_key = hashlib.md5(json.dumps(cache_params).encode()).hexdigest()
-    
-    # Check cache first
+
     cached_result = recipe_cache.get(cache_key)
     if cached_result:
         logger.info(f"Cache hit for ingredients: {', '.join(request.ingredients)}, page {page}")
         return cached_result
-        
-    # For local testing or when BigQuery is not available
-    if client is None and os.environ.get("ENV") != "production":
-        logger.info("Using mock data for recipe search (development mode)")
-        # Return mock data with the searched ingredients
-        result = {
-            "recipes": [
-                {
-                    "title": f"Mock Recipe with {', '.join(request.ingredients[:2])}",
-                    "ingredients": request.ingredients + ["salt", "pepper", "olive oil"],
-                    "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
-                },
-                {
-                    "title": f"Another Recipe with {request.ingredients[0]}",
-                    "ingredients": [request.ingredients[0], "garlic", "onion", "butter"],
-                    "directions": ["Prepare ingredients", "Cook slowly", "Garnish and serve"]
-                }
-            ],
-            "total": 2,
-            "page": page,
-            "page_size": page_size,
-            "pages": 1
-        }
-        # Cache the result
-        recipe_cache.set(cache_key, result)
-        return result
-    
+
     try:
         start_time = time.time()
-        
-        # Check if client is available
-        if client is None:
-            raise Exception("BigQuery client is not available")
-            
-        # Optimize query: Use array contains for better performance
-        # Build optimized clauses for each ingredient
-        match_clauses = []
-        for ing in request.ingredients:
-            # For exact matches (faster)
-            exact_match = f"EXISTS(SELECT 1 FROM UNNEST(ingredients) AS i WHERE LOWER(i) = '{ing}')"
-            # For partial matches
-            partial_match = f"EXISTS(SELECT 1 FROM UNNEST(ingredients) AS i WHERE LOWER(i) LIKE '%{ing}%')"
-            match_clauses.append(f"({exact_match} OR {partial_match})")
 
-        score_expression = " + ".join([f"CASE WHEN {clause} THEN 1 ELSE 0 END" for clause in match_clauses])
-        
-        # First, get the total count for pagination
-        count_query = f"""
-            SELECT COUNT(*) as total
-            FROM (
-                SELECT title
-                FROM `recipe-data-pipeline.recipes.structured_recipes`
-                WHERE ({score_expression}) >= {min_matches}
-                LIMIT {ABSOLUTE_MAX_RESULTS}  -- Absolute hard limit
-            )
-        """
-        
-        count_result = client.query(count_query).result()
-        total_count = min(next(iter(count_result)).total, ABSOLUTE_MAX_RESULTS)  # Apply max result limit
-        total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
-        
-        # Calculate offset for pagination, ensuring we don't exceed the max_results
-        offset = min((page - 1) * page_size, total_count - 1)
-        
-        # Adjust page_size to not exceed maximum results
-        effective_page_size = min(page_size, ABSOLUTE_MAX_RESULTS - offset)
-        
-        # Add debug logging
-        logger.info(f"SQL QUERY: ingredients={len(request.ingredients)}, page={page}, limit={effective_page_size}, offset={offset}, max_results={max_results}")
-        
-        # Main query with pagination
-        query = f"""
-            SELECT title, ingredients, directions,
-                   ({score_expression}) AS match_score
-            FROM `recipe-data-pipeline.recipes.structured_recipes`
-            WHERE ({score_expression}) >= {min_matches}
-            ORDER BY match_score DESC
-            LIMIT {effective_page_size} OFFSET {offset}
-        """
+        model = GenerativeModel("gemini-2.0-flash-lite")
+        ingredients_str = ", ".join(request.ingredients)
 
-        results = client.query(query).result()
+        page_instruction = ""
+        if page > 1:
+            page_instruction = f" This is batch #{page} — generate completely different recipes from previous batches."
+
+        prompt = (
+            f"Generate exactly {page_size} unique recipes using some or all of these ingredients: {ingredients_str}.{page_instruction}\n\n"
+            f"For each recipe return a JSON object with:\n"
+            f'- "title": creative recipe name (string)\n'
+            f'- "ingredients": complete ingredient list with quantities (array of strings)\n'
+            f'- "directions": step-by-step cooking instructions (array of strings)\n\n'
+            f"Respond ONLY with a valid JSON array of {page_size} recipe objects. No markdown, no explanation, no extra text."
+        )
+
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+
+        # Strip markdown code fences if present
+        if response_text.startswith("```"):
+            response_text = response_text.split("\n", 1)[1] if "\n" in response_text else response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3].strip()
+
+        recipes_data = json.loads(response_text)
+
+        if not isinstance(recipes_data, list):
+            recipes_data = [recipes_data]
 
         recipes = []
-        for row in results:
-            # Only add up to our absolute max
-            if len(recipes) >= ABSOLUTE_MAX_RESULTS:
-                logger.warning(f"WARNING: Truncating results at {ABSOLUTE_MAX_RESULTS}")
-                break
-                
+        for r in recipes_data:
             recipes.append({
-                "title": row.title,
-                "ingredients": row.ingredients,
-                "directions": row.directions,
-                "match_score": row.match_score
+                "title": r.get("title", "Untitled Recipe"),
+                "ingredients": r.get("ingredients", []),
+                "directions": r.get("directions", [])
             })
 
         query_time = time.time() - start_time
-        logger.info(f"Query executed in {query_time:.2f} seconds")
-        
-        # Track total results for rate limiting
+        logger.info(f"Gemini generated {len(recipes)} recipes in {query_time:.2f}s")
+
         throttler.add_results(len(recipes))
-        
-        # Enhanced pagination info for frontend
-        pagination = {
-            "total": total_count,
-            "page": page,
-            "page_size": page_size,
-            "pages": total_pages,
-            "has_next": page < total_pages,
-            "has_prev": page > 1,
-            "next_page": min(page + 1, total_pages) if page < total_pages else None,
-            "prev_page": page - 1 if page > 1 else None,
-            "first_page": 1,
-            "last_page": total_pages,
-            # Generate an array of page numbers for pagination controls
-            "page_numbers": list(range(
-                max(1, page - 2),  # 2 pages before current
-                min(total_pages + 1, page + 3)  # 2 pages after current
-            ))
-        }
-        
+
+        total_pages = 5
+        total_count = total_pages * page_size
+
         result = {
-            "recipes": recipes[:ABSOLUTE_MAX_RESULTS],  # Final safety check
+            "recipes": recipes,
             "query_time_seconds": query_time,
-            "pagination": pagination
+            "pagination": {
+                "total": total_count,
+                "page": page,
+                "page_size": page_size,
+                "pages": total_pages,
+                "has_next": page < total_pages,
+                "has_prev": page > 1,
+                "next_page": page + 1 if page < total_pages else None,
+                "prev_page": page - 1 if page > 1 else None,
+                "first_page": 1,
+                "last_page": total_pages,
+                "page_numbers": list(range(max(1, page - 2), min(total_pages + 1, page + 3)))
+            }
         }
-        
-        # Cache the result
+
         recipe_cache.set(cache_key, result)
-        
         return result
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to generate recipes. Please try again."}
+        )
     except Exception as e:
-        logger.error(f"Error in recipe search: {e}")
-        # Return mock data if BigQuery query fails
-        error_result = {
-            "recipes": [
-                {
-                    "title": f"Mock Recipe with {', '.join(request.ingredients[:2])} (Error fallback)",
-                    "ingredients": request.ingredients + ["salt", "pepper", "olive oil"],
-                    "directions": ["Mix ingredients", "Cook for 20 minutes", "Serve hot"]
-                }
-            ],
-            "error": str(e),
-            "total": 1,
-            "page": page,
-            "page_size": page_size,
-            "pages": 1
-        }
-        return error_result
+        logger.error(f"Error generating recipes: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to generate recipes: {str(e)}"}
+        )
 
 @app.post("/analyze-image")
 async def analyze_image(file: UploadFile = File(...)):
