@@ -1,12 +1,7 @@
 fastapi
-replicate
 uvicorn
 pydantic
 python-multipart
-pillow
-opencv-python
-google-cloud-aiplatform
-google-auth
-google-api-core
+anthropic
 requests
 orjson

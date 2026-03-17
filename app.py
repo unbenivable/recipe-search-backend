@@ -1,16 +1,13 @@
-# Recipe Search Backend API - With Google Vertex AI
+# Recipe Search Backend API
 from fastapi import FastAPI, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import os
 import json
+import base64
 import uvicorn
-from google.oauth2 import service_account
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part
-from vertexai.vision_models import Image
-from vertexai.vision_models import MultiModalEmbeddingModel
+import anthropic
 import time
 import hashlib
 import asyncio
@@ -144,45 +141,8 @@ class RequestThrottler:
 # Initialize throttler
 throttler = RequestThrottler()
 
-gcp_credentials = None
-
-# Initialize Google Cloud / Vertex AI
-try:
-    logger.info("Using credentials from environment variable")
-    creds_str = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}")
-
-    # Clean up the credentials string
-    if creds_str.startswith("'") and creds_str.endswith("'"):
-        creds_str = creds_str[1:-1]
-    elif creds_str.startswith('"') and creds_str.endswith('"'):
-        creds_str = creds_str[1:-1]
-    creds_str = creds_str.replace('\n', '\\n')
-
-    if len(creds_str) > 0:
-        logger.info(f"Credentials string length: {len(creds_str)}")
-        if len(creds_str) < 10:
-            logger.warning("WARNING: Credentials string is too short")
-
-    credentials_info = json.loads(creds_str)
-    gcp_credentials = service_account.Credentials.from_service_account_info(credentials_info)
-
-    vertexai.init(
-        project="recipe-data-pipeline",
-        location="us-central1",
-        credentials=gcp_credentials
-    )
-
-    logger.info("Successfully initialized Vertex AI for project: recipe-data-pipeline")
-except Exception as e:
-    logger.warning(f"Warning: Unable to initialize Vertex AI: {e}")
-
-# Load the multimodal embedding model for image search
-embedding_model = None
-try:
-    embedding_model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
-    logger.info("Successfully loaded MultiModal Embedding model")
-except Exception as e:
-    logger.warning(f"Warning: Unable to load MultiModal Embedding model: {e}")
+# Initialize Anthropic client
+anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 class IngredientRequest(BaseModel):
     ingredients: List[str]
@@ -283,9 +243,6 @@ async def search_recipes(request: SearchRequest, req: Request):
     try:
         start_time = time.time()
 
-        if gcp_credentials:
-            vertexai.init(project="recipe-data-pipeline", location="us-central1", credentials=gcp_credentials)
-        model = GenerativeModel("gemini-2.0-flash-lite")
         ingredients_str = ", ".join(request.ingredients)
 
         page_instruction = ""
@@ -301,8 +258,12 @@ async def search_recipes(request: SearchRequest, req: Request):
             f"Respond ONLY with a valid JSON array of {page_size} recipe objects. No markdown, no explanation, no extra text."
         )
 
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
+        message = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        response_text = message.content[0].text.strip()
 
         # Strip markdown code fences if present
         if response_text.startswith("```"):
@@ -324,7 +285,7 @@ async def search_recipes(request: SearchRequest, req: Request):
             })
 
         query_time = time.time() - start_time
-        logger.info(f"Gemini generated {len(recipes)} recipes in {query_time:.2f}s")
+        logger.info(f"Generated {len(recipes)} recipes in {query_time:.2f}s")
 
         throttler.add_results(len(recipes))
 
@@ -353,7 +314,7 @@ async def search_recipes(request: SearchRequest, req: Request):
         return result
 
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gemini response as JSON: {e}")
+        logger.error(f"Failed to parse AI response as JSON: {e}")
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to generate recipes. Please try again."}
@@ -368,7 +329,7 @@ async def search_recipes(request: SearchRequest, req: Request):
 @app.post("/analyze-image")
 async def analyze_image(file: UploadFile = File(...)):
     """
-    Analyze a food image to extract ingredients using Google Vertex AI Gemini.
+    Analyze a food image to extract ingredients using Anthropic Claude.
 
     Returns a list of identified ingredients that can be used for recipe search.
     """
@@ -390,16 +351,21 @@ async def analyze_image(file: UploadFile = File(...)):
         )
 
     try:
-        if gcp_credentials:
-            vertexai.init(project="recipe-data-pipeline", location="us-central1", credentials=gcp_credentials)
-        model = GenerativeModel("gemini-2.0-flash-lite")
-
         prompt = "List only the food ingredients you can see in this image, one per line, nothing else."
-        image_part = Part.from_data(mime_type=content_type, data=contents)
+        image_b64 = base64.standard_b64encode(contents).decode("utf-8")
 
-        response = model.generate_content([prompt, image_part])
-
-        ingredients_text = response.text
+        message = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": content_type, "data": image_b64}},
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+        ingredients_text = message.content[0].text.strip()
 
         # Parse line-separated list into individual ingredients
         ingredients = []
@@ -499,123 +465,39 @@ async def search_by_image(
         "pagination": search_result.get("pagination", {})
     }
 
-@app.post("/similar-recipe-images")
-async def search_similar_recipe_images(
-    file: UploadFile = File(...),
-    limit: Optional[int] = 10
-):
-    """
-    Find recipes with similar looking dishes based on the uploaded image.
-    Uses Vertex AI's multimodal embedding model to find visually similar recipes.
-    """
-    if embedding_model is None:
-        return {"error": "Image search capability is not available"}
-    
-    try:
-        # Read the image file
-        contents = await file.read()
-        
-        # Create a Vertex AI image from the uploaded bytes
-        vertex_image = Image(contents)
-        
-        # Generate embedding for the query image
-        image_embedding = embedding_model.get_embeddings(
-            image=vertex_image,
-            contextual_text="food dish"
-        )
-        
-        # In a production environment, you would:
-        # 1. Have a database of recipe images with pre-computed embeddings
-        # 2. Perform a vector search to find the closest matches
-        # 3. Return the associated recipes
-        
-        # For now, we'll use a mock response:
-        return {
-            "similar_recipes": [
-                {
-                    "title": "Similar Recipe 1",
-                    "similarity_score": 0.92,
-                    "image_url": "https://example.com/recipe1.jpg",
-                    "recipe_id": "recipe123"
-                },
-                {
-                    "title": "Similar Recipe 2", 
-                    "similarity_score": 0.87,
-                    "image_url": "https://example.com/recipe2.jpg",
-                    "recipe_id": "recipe456"
-                }
-            ],
-            "message": "In production, this would return actual similar recipes based on vector search"
-        }
-    except Exception as e:
-        logger.error(f"Error in image similarity search: {e}")
-        return {"error": str(e)}
-
 @app.post("/image-to-recipe")
 async def image_to_recipe(
-    file: UploadFile = File(...), 
+    file: UploadFile = File(...),
     max_results: int = 200,
     page: int = 1,
     page_size: int = 10,
     req: Request = None
 ):
     """
-    A comprehensive endpoint that:
-    1. Analyzes the food image to identify ingredients
-    2. Searches for recipes based on the ingredients
-    3. Finds visually similar recipes based on the image appearance
-    
-    Returns all three results combined.
+    Analyze a food image, identify ingredients, and search for recipes.
     """
-    # Apply absolute hard limits
     page = max(1, min(100, page))
     page_size = max(1, min(20, page_size))
     max_results = min(ABSOLUTE_MAX_RESULTS, max_results)
-    
-    client_ip = req.state.client_ip if req else "unknown"
-    logger.info(f"IMAGE-TO-RECIPE from {client_ip}: page={page}, page_size={page_size}, max_results={max_results}")
-    
-    start_time = time.time()
-    
-    # First, analyze the image to get ingredients
-    contents = await file.read()
-    
-    # Create a cache key for this image
-    image_hash = hashlib.md5(contents).hexdigest()
-    cache_key = f"img2recipe_{image_hash}_{max_results}_{page}_{page_size}"  # Include pagination in cache key
-    
-    # Check cache first
-    cached_result = recipe_cache.get(cache_key)
-    if cached_result:
-        logger.info(f"Cache hit for image: {file.filename}")
-        return cached_result
-    
-    # Set up async tasks to run in parallel
-    async def analyze_image_task():
-        # Reset file position
-        await file.seek(0)
-        return await analyze_image(file)
-    
-    async def get_similar_recipes_task():
-        # Reset file position
-        await file.seek(0)
-        return await search_similar_recipe_images(file, limit=min(10, max_results))
-    
-    # Run both tasks in parallel
-    analysis_task = asyncio.create_task(analyze_image_task())
-    similar_task = asyncio.create_task(get_similar_recipes_task())
-    
-    # Wait for analysis to complete first (we need ingredients for recipe search)
-    analysis_result = await analysis_task
 
-    # If analyze_image returned a JSONResponse (error), propagate it
+    client_ip = req.state.client_ip if req else "unknown"
+    logger.info(f"IMAGE-TO-RECIPE from {client_ip}: page={page}, page_size={page_size}")
+
+    # Analyze the image to get ingredients
+    analysis_result = await analyze_image(file)
+
     if isinstance(analysis_result, JSONResponse):
-        similar_task.cancel()
         return analysis_result
 
     ingredients = analysis_result.get("ingredients", [])
-    
-    # For recipe search, we'll create a search request
+
+    if not ingredients:
+        return {
+            "detected_ingredients": [],
+            "recipes_by_ingredients": [],
+            "pagination": {}
+        }
+
     search_request = SearchRequest(
         ingredients=ingredients,
         page=page,
@@ -623,29 +505,14 @@ async def image_to_recipe(
         min_matches=1,
         max_results=max_results
     )
-    
-    # Start recipe search immediately
-    recipes_task = asyncio.create_task(search_recipes(search_request, req))
-    
-    # Wait for both remaining tasks to complete
-    similar_result, recipes_result = await asyncio.gather(similar_task, recipes_task)
-    
-    similar_recipes = similar_result.get("similar_recipes", [])
-    recipes_by_ingredients = recipes_result.get("recipes", [])
-    
-    # Prepare the final response
-    result = {
+
+    recipes_result = await search_recipes(search_request, req)
+
+    return {
         "detected_ingredients": ingredients,
-        "recipes_by_ingredients": recipes_by_ingredients,
-        "similar_looking_recipes": similar_recipes,
-        "processing_time_seconds": time.time() - start_time,
+        "recipes_by_ingredients": recipes_result.get("recipes", []),
         "pagination": recipes_result.get("pagination", {})
     }
-    
-    # Cache the result
-    recipe_cache.set(cache_key, result)
-    
-    return result
 
 @app.get("/api/pagination-helper")
 async def pagination_helper(
