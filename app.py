@@ -144,6 +144,8 @@ class RequestThrottler:
 # Initialize throttler
 throttler = RequestThrottler()
 
+gcp_credentials = None
+
 # Initialize Google Cloud / Vertex AI
 try:
     logger.info("Using credentials from environment variable")
@@ -162,12 +164,12 @@ try:
             logger.warning("WARNING: Credentials string is too short")
 
     credentials_info = json.loads(creds_str)
-    credentials = service_account.Credentials.from_service_account_info(credentials_info)
+    gcp_credentials = service_account.Credentials.from_service_account_info(credentials_info)
 
     vertexai.init(
         project="recipe-data-pipeline",
         location="us-central1",
-        credentials=credentials
+        credentials=gcp_credentials
     )
 
     logger.info("Successfully initialized Vertex AI for project: recipe-data-pipeline")
@@ -281,6 +283,8 @@ async def search_recipes(request: SearchRequest, req: Request):
     try:
         start_time = time.time()
 
+        if gcp_credentials:
+            vertexai.init(project="recipe-data-pipeline", location="us-central1", credentials=gcp_credentials)
         model = GenerativeModel("gemini-2.0-flash-lite")
         ingredients_str = ", ".join(request.ingredients)
 
@@ -386,6 +390,8 @@ async def analyze_image(file: UploadFile = File(...)):
         )
 
     try:
+        if gcp_credentials:
+            vertexai.init(project="recipe-data-pipeline", location="us-central1", credentials=gcp_credentials)
         model = GenerativeModel("gemini-2.0-flash-lite")
 
         prompt = "List only the food ingredients you can see in this image, one per line, nothing else."
