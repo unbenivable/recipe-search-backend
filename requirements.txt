@@ -1,5 +1,5 @@
 fastapi
-replicate\nreplicate
+replicate
 uvicorn
 pydantic
 python-multipart
